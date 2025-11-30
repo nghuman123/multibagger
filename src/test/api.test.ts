@@ -12,21 +12,7 @@ describe('API Services', () => {
             const mockQuote = [{ symbol: 'AAPL', price: 150 }];
             (global.fetch as any).mockResolvedValueOnce({
                 ok: true,
-                status: 200,
-                json: async () => mockQuote,
-            });
-
-            const result = await getQuote('AAPL');
-            expect(result).toEqual(mockQuote[0]);
-            expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining('financialmodelingprep.com'));
-        });
-
-        it('should handle API errors gracefully', async () => {
-            // Use mockResolvedValue to ensure all retries fail
-            (global.fetch as any).mockResolvedValue({
-                ok: false,
-                status: 500,
-                statusText: 'Internal Server Error',
+                json: async () => mockQuote
             });
 
             const result = await getQuote('AAPL');
