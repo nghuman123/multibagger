@@ -12,8 +12,10 @@ import type {
   FinancialGrowth,
   QuantitativeScore,
   SectorType,
+  SectorType,
   FinnhubMetrics
 } from '../../types';
+import { STRATEGY } from '../../config/strategyConfig';
 
 // ============ HELPER FUNCTIONS ============
 
@@ -66,10 +68,24 @@ export const calculateGrowthScore = (
     : 0;
 
   // Fallback 1: Calculate from income statements
-  if (!cagr3yr && incomeStatements.length >= 12) {
-    const oldestRevenue = incomeStatements[11]?.revenue || 0;
-    const newestRevenue = incomeStatements[0]?.revenue || 0;
-    cagr3yr = calculateCAGR(oldestRevenue, newestRevenue, 3);
+  if (!cagr3yr) {
+    if (incomeStatements.length >= 12) {
+      // Standard 3-Year CAGR
+      const oldestRevenue = incomeStatements[11]?.revenue || 0;
+      const newestRevenue = incomeStatements[0]?.revenue || 0;
+      cagr3yr = calculateCAGR(oldestRevenue, newestRevenue, 3);
+    } else if (incomeStatements.length >= 5) {
+      // Dynamic CAGR for recent IPOs (1.25 to <3 years)
+      const quarters = incomeStatements.length;
+      const oldestRevenue = incomeStatements[quarters - 1]?.revenue || 0;
+      const newestRevenue = incomeStatements[0]?.revenue || 0;
+
+      // Calculate years based on quarter count (approx)
+      const years = (quarters - 1) / 4;
+      cagr3yr = calculateCAGR(oldestRevenue, newestRevenue, years);
+
+      console.log(`[QuantScore] Dynamic CAGR calculated over ${years} years: ${cagr3yr.toFixed(2)}%`);
+    }
   }
 
   // Fallback 2: Use Finnhub metrics
@@ -94,9 +110,9 @@ export const calculateGrowthScore = (
 
   // Score calculation
   let score = 0;
-  if (cagr3yr > 30) score = 30;
-  else if (cagr3yr > 20) score = 20;
-  else if (cagr3yr > 15) score = 10;
+  if (cagr3yr > STRATEGY.GROWTH.CAGR_ELITE) score = 30;
+  else if (cagr3yr > STRATEGY.GROWTH.CAGR_HIGH) score = 20;
+  else if (cagr3yr > STRATEGY.GROWTH.CAGR_MODERATE) score = 10;
 
   // Acceleration bonus
   const accelerating = lastQuarterGrowth > cagr3yr && cagr3yr > 0;
@@ -143,11 +159,11 @@ export const calculateQualityScore = (
   // Score based on sector threshold
   let score = 0;
   const isSoftware = ['SaaS', 'FinTech', 'Other'].includes(sector);
-  const threshold = isSoftware ? 70 : 40;
+  const threshold = isSoftware ? STRATEGY.QUALITY.GM_SOFTWARE_ELITE : STRATEGY.QUALITY.GM_HARDWARE_ELITE;
 
   if (currentGM >= threshold) score += 15;
-  else if (currentGM >= threshold * 0.8) score += 10;
-  else if (currentGM >= threshold * 0.6) score += 5;
+  else if (currentGM >= threshold * STRATEGY.QUALITY.GM_THRESHOLD_FACTOR_HIGH) score += 10;
+  else if (currentGM >= threshold * STRATEGY.QUALITY.GM_THRESHOLD_FACTOR_MODERATE) score += 5;
 
   // Trend adjustment
   if (trend === 'Expanding') score += 10;
@@ -190,10 +206,10 @@ export const calculateRuleOf40Score = (
   const ruleOf40Value = revenueGrowth + ebitdaMargin;
 
   let score = 0;
-  if (ruleOf40Value > 50) score = 20;
-  else if (ruleOf40Value > 40) score = 15;
-  else if (ruleOf40Value > 30) score = 10;
-  else if (ruleOf40Value > 20) score = 5;
+  if (ruleOf40Value > STRATEGY.RULE_OF_40.ELITE) score = 20;
+  else if (ruleOf40Value > STRATEGY.RULE_OF_40.HIGH) score = 15;
+  else if (ruleOf40Value > STRATEGY.RULE_OF_40.MODERATE) score = 10;
+  else if (ruleOf40Value > STRATEGY.RULE_OF_40.ACCEPTABLE) score = 5;
 
   return { score, value: ruleOf40Value, revenueGrowth, ebitdaMargin };
 };
@@ -256,9 +272,9 @@ export const calculateValuationScore = (
   const psgRatio = priceToSales / revenueGrowthPct;
 
   let score = 0;
-  if (psgRatio < 0.3) score = 10;
-  else if (psgRatio < 0.5) score = 7;
-  else if (psgRatio < 1.0) score = 4;
+  if (psgRatio < STRATEGY.VALUATION.PSG_CHEAP) score = 10;
+  else if (psgRatio < STRATEGY.VALUATION.PSG_ATTRACTIVE) score = 7; // Note: config has 0.6, old code had 0.5. I'll stick to config names but Logic had 0.5. Let's use config.
+  else if (psgRatio < STRATEGY.VALUATION.PSG_FAIR) score = 4;
 
   return { score, psgRatio };
 };

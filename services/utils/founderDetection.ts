@@ -57,7 +57,8 @@ export function detectFounderStatus(
   companyName: string,
   description: string,
   companyAgeYears: number,
-  ticker?: string
+  ticker?: string,
+  keyExecutives?: { name: string; title: string }[]
 ): FounderCheckResult {
 
   // 1. Check manual override list first
@@ -66,6 +67,53 @@ export function detectFounderStatus(
       isFounder: true,
       reason: `Known founder-led: ${KNOWN_FOUNDER_LED_STRICT[ticker]}`,
       confidence: 'high'
+    }
+
+    // 1.5 Check Key Executives API (Most reliable data source)
+    if (keyExecutives && keyExecutives.length > 0 && ceoName) {
+      const ceoLower = ceoName.toLowerCase();
+
+      // Find the CEO in the executives list (fuzzy match name)
+      const executiveCeo = keyExecutives.find(exec =>
+        exec.name.toLowerCase().includes(ceoLower) ||
+        ceoLower.includes(exec.name.toLowerCase())
+      );
+
+      if (executiveCeo) {
+        const titleLower = executiveCeo.title.toLowerCase();
+        if (titleLower.includes('founder')) {
+          return {
+            isFounder: true,
+            reason: `Key Executives: CEO ${executiveCeo.name} has title "${executiveCeo.title}"`,
+            confidence: 'high'
+          };
+        }
+      }
+    }
+
+    // 1.5 Check Key Executives API (Most reliable data source)
+    if (keyExecutives && keyExecutives.length > 0 && ceoName) {
+      const ceoLower = ceoName.toLowerCase();
+
+      // Find the CEO in the executives list (fuzzy match name)
+      const executiveCeo = keyExecutives.find(exec =>
+        exec.name.toLowerCase().includes(ceoLower) ||
+        ceoLower.includes(exec.name.toLowerCase())
+      );
+
+      if (executiveCeo) {
+        const titleLower = executiveCeo.title.toLowerCase();
+        if (titleLower.includes('founder')) {
+          return {
+            isFounder: true,
+            reason: `Key Executives: CEO ${executiveCeo.name} has title "${executiveCeo.title}"`,
+            confidence: 'high'
+          };
+        }
+      }
+
+      // Fallback: If CEO not found matching name, check if ANY executive has "Founder" and "CEO" in title?
+      // User specifically asked to match CEO name.
     };
   }
 

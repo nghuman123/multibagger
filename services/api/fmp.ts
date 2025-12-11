@@ -302,6 +302,15 @@ export const getInsiderTrades = async (symbol: string): Promise<InsiderTrade[]> 
 };
 
 // Bulk fetch for screener
+export const getKeyExecutives = async (symbol: string): Promise<KeyExecutive[]> => {
+  try {
+    return await fetchData<KeyExecutive[]>(`/key-executives/${symbol}`);
+  } catch (error) {
+    console.error(`Error fetching key executives for ${symbol}:`, error);
+    return [];
+  }
+};
+
 export const getStockScreener = async (params: {
   marketCapMoreThan?: number;
   marketCapLowerThan?: number;

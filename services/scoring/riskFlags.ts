@@ -22,27 +22,25 @@ const calculateBeneishMScore = (
   const safeDivide = (a: number, b: number) => b === 0 ? 0 : a / b;
 
   // 1. DSRI: Days Sales in Receivables Index
-  // (Receivables_t / Sales_t) / (Receivables_t-1 / Sales_t-1)
   const receivables_t = currentBalance.netReceivables || 0;
   const receivables_t1 = priorBalance.netReceivables || 0;
-  const sales_t = currentIncome.revenue || 1; // Avoid div/0
+  const sales_t = currentIncome.revenue || 1;
   const sales_t1 = priorIncome.revenue || 1;
 
   // If prior receivables are 0, DSRI defaults to 1.0 (neutral) to avoid false spikes
+  // Formula: (Rec_t / Sales_t) / (Rec_t-1 / Sales_t-1)
   const dsri = (receivables_t1 > 0 && sales_t1 > 0)
     ? ((receivables_t / sales_t) / (receivables_t1 / sales_t1))
     : 1.0;
 
   // 2. GMI: Gross Margin Index
-  // (GrossMargin_t-1 / GrossMargin_t)
   const gm_prior = priorIncome.grossProfitRatio || 0;
   const gm_current = currentIncome.grossProfitRatio || 0;
   // If margins are deteriorating (prior > current), GMI > 1 (Flag)
   const gmi = gm_current > 0 ? safeDivide(gm_prior, gm_current) : 1.0;
 
   // 3. AQI: Asset Quality Index
-  // (1 - (CurrentAssets + PPE) / TotalAssets)_t / (1 - (CurrentAssets + PPE) / TotalAssets)_t-1
-  // Measures increase in soft/intangible assets (potential for capitalization fraud)
+  // Formula: (1 - (CurrentAssets + PPE) / TotalAssets)_t / (1 - ...) _t-1
   const hardAssets_t = (currentBalance.totalCurrentAssets || 0) + (currentBalance.propertyPlantEquipmentNet || 0);
   const hardAssets_t1 = (priorBalance.totalCurrentAssets || 0) + (priorBalance.propertyPlantEquipmentNet || 0);
   const totalAssets_t = currentBalance.totalAssets || 1;
@@ -51,15 +49,15 @@ const calculateBeneishMScore = (
   const softAssetRatio_t = 1 - (hardAssets_t / totalAssets_t);
   const softAssetRatio_t1 = 1 - (hardAssets_t1 / totalAssets_t1);
 
-  const aqi = softAssetRatio_t1 > 0 ? (softAssetRatio_t / softAssetRatio_t1) : 1.0;
+  const aqi = (softAssetRatio_t1 > 0 && softAssetRatio_t1 < 1)
+    ? (softAssetRatio_t / softAssetRatio_t1)
+    : 1.0;
 
   // 4. SGI: Sales Growth Index
-  // Sales_t / Sales_t-1
   const sgi = safeDivide(currentIncome.revenue, priorIncome.revenue);
 
   // 5. DEPI: Depreciation Index
-  // (Depr_t-1 / (Depr_t-1 + PPE_t-1)) / (Depr_t / (Depr_t + PPE_t))
-  // Rising DEPI means slowing depreciation rate (boosting earnings artificially)
+  // Formula: (Depr_t-1 / (Depr_t-1 + PPE_t-1)) / (Depr_t / (Depr_t + PPE_t))
   const depr_t = currentIncome.depreciationAndAmortization || 0;
   const depr_t1 = priorIncome.depreciationAndAmortization || 0;
   const ppe_t = currentBalance.propertyPlantEquipmentNet || 0;
@@ -71,7 +69,7 @@ const calculateBeneishMScore = (
   const depi = deprRate_t > 0 ? (deprRate_t1 / deprRate_t) : 1.0;
 
   // 6. SGAI: SG&A Index
-  // (SGA_t / Sales_t) / (SGA_t-1 / Sales_t-1)
+  // Formula: (SGA_t / Sales_t) / (SGA_t-1 / Sales_t-1)
   const sga_t = currentIncome.sellingGeneralAndAdministrativeExpenses || 0;
   const sga_t1 = priorIncome.sellingGeneralAndAdministrativeExpenses || 0;
 
@@ -80,19 +78,16 @@ const calculateBeneishMScore = (
     : 1.0;
 
   // 7. TATA: Total Accruals to Total Assets
-  // (NetIncome - CashFlowOps) / TotalAssets ... or simplified:
-  // Here we use: (NetIncome - DeltaCash) / TotalAssets (Original Beneish approximation? No, usually use OCF)
-  // Standard TATA = (Income from Cont Ops - Cash from Ops) / Total Assets
-  // Our code used: (NetIncome - DeltaCash). Let's stick to existing or user spec?
-  // User didn't specify TATA fix, but we should probably check if we have OCF passed into this function?
-  // We only have Income/Balance here. We'll stick to original working code for TATA unless specified.
+  // We explicitly use (NetIncome - (Cash_t - Cash_t-1) / TotalAssets) which is the Cash-based accrual proxy
+  // Alternatively: (Net Income - Operating Cash Flow) / Total Assets if OCF is available, but signature only has Income/Balance here.
+  // Note: Standard Beneish uses (Income from Continuing Ops - Cash from Ops)
+  // Our proxy: NetIncome - DeltaCash
   const tata = safeDivide(
     (currentIncome.netIncome - (currentBalance.cashAndCashEquivalents - priorBalance.cashAndCashEquivalents)),
     currentBalance.totalAssets
   );
 
   // 8. LVGI: Leverage Index
-  // (Debt_t / Assets_t) / (Debt_t-1 / Assets_t-1) ... or (Liabilities/Assets)
   const leverage_current = safeDivide(currentBalance.totalLiabilities, currentBalance.totalAssets);
   const leverage_prior = safeDivide(priorBalance.totalLiabilities, priorBalance.totalAssets);
   const lvgi = leverage_prior > 0 ? safeDivide(leverage_current, leverage_prior) : 1.0;

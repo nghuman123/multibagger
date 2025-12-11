@@ -5,15 +5,10 @@ import { PriceHistoryData, TechnicalScore } from '../../src/types/scoring';
  * Goal: Is the stock in a constructive trend?
  */
 
-// 1. Relative Strength vs SPY/QQQ (0-10)
-// For now, we'll assume the input 'history' is just the stock's history.
-// To do true RS vs SPY, we'd need SPY history.
-// Simplified Proxy: Absolute performance over 12 months.
-// If > 20% -> 10.
-// Ideally, the caller should provide RS metric if available.
-// Let's assume the 'history' allows us to calc 12-month return.
+// 1. Relative Strength vs SPY (0-10)
+// Formula: (Stock 1Y % - Benchmark 1Y %)
 const scoreRelativeStrength = (data: PriceHistoryData): { score: number; detail: string } => {
-    if (data.history.length < 250) { // Approx 1 year trading days
+    if (data.history.length < 250) {
         return { score: 0, detail: 'Insufficient history for RS check' };
     }
 
@@ -24,34 +19,36 @@ const scoreRelativeStrength = (data: PriceHistoryData): { score: number; detail:
 
     const stockPerf = ((current - oneYearAgo) / oneYearAgo) * 100;
 
-    // [MOD] Benchmarking Logic
+    // Benchmarking Logic (Relative Strength)
     let benchmarkPerf = 0;
-    let hasBenchmark = false;
 
-    if (data.benchmarkHistory && data.benchmarkHistory.length >= 250) {
-        const benchCurrent = data.benchmarkHistory[0].close;
-        const benchYearAgo = data.benchmarkHistory[Math.min(data.benchmarkHistory.length - 1, 250)].close;
-        if (benchYearAgo > 0) {
-            benchmarkPerf = ((benchCurrent - benchYearAgo) / benchYearAgo) * 100;
-            hasBenchmark = true;
-        }
+    // We strictly require benchmark history for true RS.
+    if (!data.benchmarkHistory || data.benchmarkHistory.length < 250) {
+        // If no benchmark, we can't calculate true RS. 
+        // Fallback: Assume neutral market (0%) or fail safe?
+        // User critique: "Buying high-beta stocks floating with tide".
+        // Solution: Return score 0 or 3 (Neutral) if we can't measure outperformance.
+        return { score: 0, detail: 'RS: Missing SPY Benchmark Data' };
+    }
+
+    const benchCurrent = data.benchmarkHistory[0].close;
+    const benchYearAgo = data.benchmarkHistory[Math.min(data.benchmarkHistory.length - 1, 250)].close;
+
+    if (benchYearAgo > 0) {
+        benchmarkPerf = ((benchCurrent - benchYearAgo) / benchYearAgo) * 100;
     }
 
     // "True" Relative Strength = Stock Delta - Benchmark Delta
-    // If no benchmark, we fall back to absolute > 20% rule but strictly (maybe assumed market is 10%?)
-    // Let's rely on Relative Strength if possible.
-    const relativeStrength = hasBenchmark ? (stockPerf - benchmarkPerf) : (stockPerf - 10); // Assume 10% market baseline if missing
+    const relativeStrength = stockPerf - benchmarkPerf;
 
     let score = 0;
-    if (relativeStrength > 20) score = 10;      // Crushing market
-    else if (relativeStrength >= 5) score = 7;  // Beating market
+    if (relativeStrength > 20) score = 10;      // Crushing market (+20% Alpha)
+    else if (relativeStrength >= 5) score = 7;  // Beating market (+5% Alpha)
     else if (relativeStrength >= 0) score = 3;  // Matching
     else if (relativeStrength >= -10) score = 1;// Lagging slightly
     else score = 0;                             // Underperforming
 
-    const detailText = hasBenchmark
-        ? `RS vs SPY: ${relativeStrength.toFixed(1)}% (Stock: ${stockPerf.toFixed(1)}%, SPY: ${benchmarkPerf.toFixed(1)}%) (+${score}/10)`
-        : `Rel Perf (Est): ${relativeStrength.toFixed(1)}% (Stock: ${stockPerf.toFixed(1)}%) (+${score}/10)`;
+    const detailText = `RS vs SPY: ${relativeStrength.toFixed(1)}% (Stock: ${stockPerf.toFixed(1)}%, SPY: ${benchmarkPerf.toFixed(1)}%) (+${score}/10)`;
 
     return { score, detail: detailText };
 };

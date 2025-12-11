@@ -10,6 +10,8 @@
  * - PSG is a fallback for high-growth companies that are not yet optimized for earnings.
  */
 
+import { STRATEGY } from '../../config/strategyConfig';
+
 export interface ValuationMetrics {
     pe: number | null;
     ps: number | null;
@@ -31,8 +33,8 @@ function calcGrowthRateForValuation(metrics: {
 
 export function calcValuationScore(metrics: ValuationMetrics): number {
     // [TASK 3] Safety Valve for Bubble Valuations
-    if (metrics.ps && metrics.ps > 50) {
-        console.log(`[Valuation] Safety Valve: P/S ${metrics.ps} > 50 -> Score: -10`);
+    if (metrics.ps && metrics.ps > STRATEGY.VALUATION.PS_SAFETY_Valve) {
+        console.log(`[Valuation] Safety Valve: P/S ${metrics.ps} > ${STRATEGY.VALUATION.PS_SAFETY_Valve} -> Score: -10`);
         return -10;
     }
 
@@ -50,11 +52,11 @@ export function calcValuationScore(metrics: ValuationMetrics): number {
     if (metrics.pe && metrics.pe > 0) {
         const peg = metrics.pe / (growth * 100);
 
-        if (peg < 0.5) score += 15;    // “Screaming cheap”
-        else if (peg < 1.0) score += 10; // Attractive
-        else if (peg < 1.5) score += 5;  // Fair
-        else if (peg < 2.0) score += 0;  // Full
-        else if (peg < 3.0) score -= 5;  // Expensive
+        if (peg < STRATEGY.VALUATION.PEG_CHEAP) score += 15;    // “Screaming cheap”
+        else if (peg < STRATEGY.VALUATION.PEG_ATTRACTIVE) score += 10; // Attractive
+        else if (peg < STRATEGY.VALUATION.PEG_FAIR) score += 5;  // Fair
+        else if (peg < STRATEGY.VALUATION.PEG_FULL) score += 0;  // Full
+        else if (peg < STRATEGY.VALUATION.PEG_EXPENSIVE) score -= 5;  // Expensive
         else score -= 10;                // Very Expensive
 
         console.log(`[Valuation] PEG=${peg.toFixed(2)} (PE=${metrics.pe}, Growth=${(growth * 100).toFixed(1)}%) -> Score: ${score}`);
@@ -65,10 +67,10 @@ export function calcValuationScore(metrics: ValuationMetrics): number {
     if ((!metrics.pe || metrics.pe <= 0) && metrics.ps && metrics.ps > 0) {
         const psg = metrics.ps / (growth * 100);
 
-        if (psg < 0.3) score += 10;    // Very attractive
-        else if (psg < 0.6) score += 5;
-        else if (psg < 1.0) score += 0;
-        else if (psg < 1.5) score -= 5;
+        if (psg < STRATEGY.VALUATION.PSG_CHEAP) score += 10;    // Very attractive
+        else if (psg < STRATEGY.VALUATION.PSG_ATTRACTIVE) score += 5;
+        else if (psg < STRATEGY.VALUATION.PSG_FAIR) score += 0;
+        else if (psg < STRATEGY.VALUATION.PSG_EXPENSIVE) score -= 5;
         else score -= 10;
 
         console.log(`[Valuation] PSG=${psg.toFixed(2)} (PS=${metrics.ps}, Growth=${(growth * 100).toFixed(1)}%) -> Score: ${score}`);

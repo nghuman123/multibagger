@@ -297,9 +297,18 @@ export interface HistoricalPrice {
   unadjustedVolume: number;
   change: number;
   changePercent: number;
-  vwap: number;
   label: string;
   changeOverTime: number;
+}
+
+export interface KeyExecutive {
+  title: string;
+  name: string;
+  pay?: number;
+  currencyPay?: string;
+  gender?: string;
+  yearBorn?: number;
+  titleSince?: string;
 }
 
 // ============ FINNHUB DATA TYPES ============
