@@ -254,54 +254,47 @@ const calculateCashRunway = (
 const calculateQualityOfEarnings = (
   incomes: IncomeStatement[],
   cashFlows: CashFlowStatement[]
-): { status: 'Pass' | 'Fail' | 'Warn'; consecutiveNegative: number; conversionRatio: number } => {
+): { status: 'Pass' | 'Fail' | 'Warn'; consecutiveNegative: number; conversionRatio: number; paperTiger: boolean } => {
 
   if (incomes.length < 4 || cashFlows.length < 4) {
-    return { status: 'Warn', consecutiveNegative: 0, conversionRatio: 1 };
+    return { status: 'Warn', consecutiveNegative: 0, conversionRatio: 1, paperTiger: false };
   }
 
-  let consecutiveDivergence = 0;
-  const periods = Math.min(incomes.length, cashFlows.length, 8); // Check last 2 years
+  // Check last 2 years (8 quarters)
+  const periods = Math.min(incomes.length, cashFlows.length, 8);
+  let paperTigerCount = 0;
 
   for (let i = 0; i < periods; i++) {
     const ni = incomes[i].netIncome;
     const ocf = cashFlows[i].operatingCashFlow;
 
-    // Divergence: NI Positive AND (OCF Negative OR OCF < 0.5 * NI)
-    if (ni > 0 && (ocf < 0 || ocf < ni * 0.5)) {
-      consecutiveDivergence++;
-    } else {
-      consecutiveDivergence = 0; // Reset if streak broken? Or just count total? Spec says "for >= 2 consecutive years"
-      // If we want consecutive, we should break or track max streak.
-      // But loop goes backwards in time (0 is newest).
-      // So if 0 and 1 are divergent, that's 2 quarters.
-      // We need to check if the *most recent* streak is >= 6 quarters.
+    // "Paper Tiger" Logic: Net Income > 0 BUT OCF < 0
+    if (ni > 0 && ocf < 0) {
+      paperTigerCount++;
     }
   }
 
-  // Re-check logic: "Net Income consistently positive while OCF negative... for >= 2 consecutive years (or >= 6 quarters)"
-  // Let's count consecutive from most recent.
-  let currentStreak = 0;
-  for (let i = 0; i < periods; i++) {
-    const ni = incomes[i].netIncome;
-    const ocf = cashFlows[i].operatingCashFlow;
-    if (ni > 0 && (ocf < 0 || ocf < ni * 0.5)) {
-      currentStreak++;
-    } else {
-      break;
-    }
-  }
-
-  // Conversion Ratio (TTM)
+  // Calculate Conversion Ratio (TTM)
   const ttmNI = incomes.slice(0, 4).reduce((sum, i) => sum + i.netIncome, 0);
-  const ttmFCF = cashFlows.slice(0, 4).reduce((sum, c) => sum + c.freeCashFlow, 0);
-  const conversionRatio = ttmNI > 0 ? ttmFCF / ttmNI : 1; // Default to 1 if NI negative (not applicable)
+  const ttmOCF = cashFlows.slice(0, 4).reduce((sum, c) => sum + c.operatingCashFlow, 0); // Use OCF not FCF for ratio
+
+  // User asked: earningsQualityRatio = operatingCashFlow / netIncome;
+  const conversionRatio = ttmNI > 0 ? ttmOCF / ttmNI : 1;
 
   let status: 'Pass' | 'Fail' | 'Warn' = 'Pass';
-  if (currentStreak >= 6) status = 'Fail';
-  else if (currentStreak >= 4) status = 'Warn';
+  let paperTiger = false;
 
-  return { status, consecutiveNegative: currentStreak, conversionRatio };
+  // If "Paper Tiger" condition exists for significant portion (e.g. > 50% of periods or TTM)
+  // User: "negative for 2 years -> RED FLAG". So if count >= 8? Or maybe just TTM is bad?
+  // Let's be strict: if TTM NI > 0 and TTM OCF < 0, that's a Paper Tiger.
+  if (ttmNI > 0 && ttmOCF < 0) {
+    status = 'Fail';
+    paperTiger = true;
+  } else if (paperTigerCount >= 4) { // Suspicious if half the time they have no cash
+    status = 'Warn';
+  }
+
+  return { status, consecutiveNegative: paperTigerCount, conversionRatio, paperTiger };
 };
 
 // ============ MAIN RISK FUNCTION ============

@@ -477,6 +477,11 @@ export interface MultiBaggerAnalysis {
   sources: string[];
   dataQualityWarnings?: string[];
   warningFull?: string;
+
+  // [NEW] Macro & Valuation Overlay
+  macroRegime?: 'Bull' | 'Bear' | 'Neutral';
+  impliedGrowthRate?: number | null; // From Reverse DCF
+  valuationGap?: number | null;      // Actual Growth - Implied Growth
 }
 
 // ============ INSTITUTIONAL UPGRADE TYPES ============

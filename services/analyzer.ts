@@ -14,6 +14,7 @@ import { extractInstitutionalData } from './geminiService.ts'; // [NEW] Wrapper 
 import { computeMultiBaggerScore } from './scoring/multiBaggerScore.ts';
 
 import { calculateMultibaggerScore, validateMetrics } from './scoringService.ts'; // [NEW] Institutional Scoring
+import { calculateImpliedGrowth } from './scoring/valuationScore.ts'; // [NEW]
 
 import { computeTechnicalScore } from './scoring/technicalScore.ts';
 import { computeSqueezeSetup } from './scoring/squeezeSetup.ts';
@@ -842,8 +843,31 @@ export const analyzeStock = async (ticker: string): Promise<MultiBaggerAnalysis 
     sma200: calcSma200,
     week52High: quote.yearHigh,
     week52Low: quote.yearLow,
-    benchmarkHistory: spyHistory // [NEW]
+    benchmarkHistory: spyHistory
   });
+
+  // [NEW] Macro Regime Check (SPY 200DMA)
+  let macroRegime: 'Bull' | 'Bear' | 'Neutral' = 'Neutral';
+  let spySma200 = 0;
+  if (spyHistory && spyHistory.length >= 200) {
+    const recent = spyHistory.slice(0, 200);
+    const sum = recent.reduce((a, b) => a + b.close, 0);
+    spySma200 = sum / 200;
+    const currentSpy = recent[0].close;
+
+    macroRegime = currentSpy >= spySma200 ? 'Bull' : 'Bear';
+    console.log(`[Macro] SPY $${currentSpy.toFixed(2)} vs SMA200 $${spySma200.toFixed(2)} -> Regime: ${macroRegime}`);
+  }
+
+  // [NEW] Reverse DCF (Implied Growth)
+  const peForDcf = quote.pe || keyMetrics?.peRatio || 0;
+  const impliedGrowth = calculateImpliedGrowth(peForDcf);
+  const actualGrowth = quantScore.revenueGrowth3YrCAGR; // Use 3Y Revenue CAGR as proxy for "Actual"
+  const valuationGap = (impliedGrowth !== null) ? (actualGrowth - impliedGrowth) : null;
+
+  if (impliedGrowth !== null) {
+    console.log(`[Valuation] Reverse DCF: Price implies ${impliedGrowth.toFixed(1)}% growth. Actual: ${actualGrowth.toFixed(1)}%. Gap: ${valuationGap?.toFixed(1)}%`);
+  }
 
   // STEP 9: Squeeze Setup
   const squeezeSetup = computeSqueezeSetup({
@@ -996,7 +1020,16 @@ export const analyzeStock = async (ticker: string): Promise<MultiBaggerAnalysis 
 
   const overallTier = mapScoreToTier(finalScore, riskFlags.disqualified);
   const verdict = determineVerdict(finalScore, riskFlags.disqualified, overallTier);
-  const suggestedPositionSize = determinePositionSize(overallTier, riskFlags.disqualified);
+  let suggestedPositionSize = determinePositionSize(overallTier, riskFlags.disqualified);
+
+  // [NEW] Macro Regime Adjustment
+  if (macroRegime === 'Bear' && suggestedPositionSize !== '0%') {
+    console.warn(`[Macro] Bear Market Detected. Halving recommended position size.`);
+    // Simple string manipulation or logic
+    if (suggestedPositionSize.includes('High') || suggestedPositionSize.includes('Full')) suggestedPositionSize = 'Half Position (Macro Caution)';
+    else if (suggestedPositionSize.includes('Medium')) suggestedPositionSize = 'Quarter Position (Macro Caution)';
+    else suggestedPositionSize = 'Cash / Watch (Macro Caution)';
+  }
 
   console.log('[DebugScore]', ticker, {
     quantScore: multiBaggerScore.totalScore,
@@ -1132,7 +1165,12 @@ export const analyzeStock = async (ticker: string): Promise<MultiBaggerAnalysis 
       bullCase: antigravityReport?.bullCase,
       dataQualityWarnings,
       riskWarnings: riskFlags.warnings
-    })
+    }),
+
+    // [NEW]
+    macroRegime,
+    impliedGrowthRate: impliedGrowth,
+    valuationGap
   };
 
   console.log(`[Analyzer] Complete: ${ticker} = ${verdict} (Score: ${result.finalScore})`);

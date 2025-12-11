@@ -79,3 +79,20 @@ export function calcValuationScore(metrics: ValuationMetrics): number {
 
     return 0; // No valid valuation metrics
 }
+
+/**
+ * Reverse DCF (Simplified Graham Formula)
+ * Returns the "Implied Growth Rate" (%) priced into the stock.
+ * Formula: P/E = 8.5 + 2g  =>  g = (P/E - 8.5) / 2
+ */
+export function calculateImpliedGrowth(pe: number | null): number | null {
+    if (!pe || pe <= 0) return null;
+
+    // Graham's formula: Value = EPS * (8.5 + 2g)
+    // P/E = 8.5 + 2g
+    // 2g = P/E - 8.5
+    // g = (P/E - 8.5) / 2
+
+    const impliedGrowth = (pe - 8.5) / 2;
+    return impliedGrowth > 0 ? impliedGrowth : 0;
+}
