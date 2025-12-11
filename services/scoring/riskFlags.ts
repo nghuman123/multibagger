@@ -21,40 +21,83 @@ const calculateBeneishMScore = (
   // Safely handle division
   const safeDivide = (a: number, b: number) => b === 0 ? 0 : a / b;
 
-  // DSRI: Days Sales in Receivables Index
+  // 1. DSRI: Days Sales in Receivables Index
   // (Receivables_t / Sales_t) / (Receivables_t-1 / Sales_t-1)
-  // FMP doesn't provide receivables directly, estimate from current assets
-  const dsri = 1.0; // Simplified - would need receivables data
+  const receivables_t = currentBalance.netReceivables || 0;
+  const receivables_t1 = priorBalance.netReceivables || 0;
+  const sales_t = currentIncome.revenue || 1; // Avoid div/0
+  const sales_t1 = priorIncome.revenue || 1;
 
-  // GMI: Gross Margin Index
+  // If prior receivables are 0, DSRI defaults to 1.0 (neutral) to avoid false spikes
+  const dsri = (receivables_t1 > 0 && sales_t1 > 0)
+    ? ((receivables_t / sales_t) / (receivables_t1 / sales_t1))
+    : 1.0;
+
+  // 2. GMI: Gross Margin Index
+  // (GrossMargin_t-1 / GrossMargin_t)
   const gm_prior = priorIncome.grossProfitRatio || 0;
   const gm_current = currentIncome.grossProfitRatio || 0;
-  const gmi = gm_prior > 0 ? safeDivide(gm_prior, gm_current) : 1.0;
+  // If margins are deteriorating (prior > current), GMI > 1 (Flag)
+  const gmi = gm_current > 0 ? safeDivide(gm_prior, gm_current) : 1.0;
 
-  // AQI: Asset Quality Index
-  const aqi = 1.0; // Simplified
+  // 3. AQI: Asset Quality Index
+  // (1 - (CurrentAssets + PPE) / TotalAssets)_t / (1 - (CurrentAssets + PPE) / TotalAssets)_t-1
+  // Measures increase in soft/intangible assets (potential for capitalization fraud)
+  const hardAssets_t = (currentBalance.totalCurrentAssets || 0) + (currentBalance.propertyPlantEquipmentNet || 0);
+  const hardAssets_t1 = (priorBalance.totalCurrentAssets || 0) + (priorBalance.propertyPlantEquipmentNet || 0);
+  const totalAssets_t = currentBalance.totalAssets || 1;
+  const totalAssets_t1 = priorBalance.totalAssets || 1;
 
-  // SGI: Sales Growth Index
+  const softAssetRatio_t = 1 - (hardAssets_t / totalAssets_t);
+  const softAssetRatio_t1 = 1 - (hardAssets_t1 / totalAssets_t1);
+
+  const aqi = softAssetRatio_t1 > 0 ? (softAssetRatio_t / softAssetRatio_t1) : 1.0;
+
+  // 4. SGI: Sales Growth Index
+  // Sales_t / Sales_t-1
   const sgi = safeDivide(currentIncome.revenue, priorIncome.revenue);
 
-  // DEPI: Depreciation Index
-  const depi = 1.0; // Simplified
+  // 5. DEPI: Depreciation Index
+  // (Depr_t-1 / (Depr_t-1 + PPE_t-1)) / (Depr_t / (Depr_t + PPE_t))
+  // Rising DEPI means slowing depreciation rate (boosting earnings artificially)
+  const depr_t = currentIncome.depreciationAndAmortization || 0;
+  const depr_t1 = priorIncome.depreciationAndAmortization || 0;
+  const ppe_t = currentBalance.propertyPlantEquipmentNet || 0;
+  const ppe_t1 = priorBalance.propertyPlantEquipmentNet || 0;
 
-  // SGAI: SG&A Index
-  const sgai = 1.0; // Simplified
+  const deprRate_t = safeDivide(depr_t, depr_t + ppe_t);
+  const deprRate_t1 = safeDivide(depr_t1, depr_t1 + ppe_t1);
 
-  // TATA: Total Accruals to Total Assets
+  const depi = deprRate_t > 0 ? (deprRate_t1 / deprRate_t) : 1.0;
+
+  // 6. SGAI: SG&A Index
+  // (SGA_t / Sales_t) / (SGA_t-1 / Sales_t-1)
+  const sga_t = currentIncome.sellingGeneralAndAdministrativeExpenses || 0;
+  const sga_t1 = priorIncome.sellingGeneralAndAdministrativeExpenses || 0;
+
+  const sgai = (sga_t1 > 0 && sales_t1 > 0)
+    ? ((sga_t / sales_t) / (sga_t1 / sales_t1))
+    : 1.0;
+
+  // 7. TATA: Total Accruals to Total Assets
+  // (NetIncome - CashFlowOps) / TotalAssets ... or simplified:
+  // Here we use: (NetIncome - DeltaCash) / TotalAssets (Original Beneish approximation? No, usually use OCF)
+  // Standard TATA = (Income from Cont Ops - Cash from Ops) / Total Assets
+  // Our code used: (NetIncome - DeltaCash). Let's stick to existing or user spec?
+  // User didn't specify TATA fix, but we should probably check if we have OCF passed into this function?
+  // We only have Income/Balance here. We'll stick to original working code for TATA unless specified.
   const tata = safeDivide(
     (currentIncome.netIncome - (currentBalance.cashAndCashEquivalents - priorBalance.cashAndCashEquivalents)),
     currentBalance.totalAssets
   );
 
-  // LVGI: Leverage Index
+  // 8. LVGI: Leverage Index
+  // (Debt_t / Assets_t) / (Debt_t-1 / Assets_t-1) ... or (Liabilities/Assets)
   const leverage_current = safeDivide(currentBalance.totalLiabilities, currentBalance.totalAssets);
   const leverage_prior = safeDivide(priorBalance.totalLiabilities, priorBalance.totalAssets);
   const lvgi = leverage_prior > 0 ? safeDivide(leverage_current, leverage_prior) : 1.0;
 
-  // M-Score Formula
+  // M-Score Formula (Traditional 8-variable model)
   const mScore = -4.84
     + (0.92 * dsri)
     + (0.528 * gmi)
@@ -64,6 +107,12 @@ const calculateBeneishMScore = (
     - (0.172 * sgai)
     + (4.679 * tata)
     - (0.327 * lvgi);
+
+  // Debug log for M-Score components if score is alarming
+  if (mScore > -2.22) { // "Grey" or "Fraud" zone start
+    // We can't log easily inside pure function without clutter, but useful for dev
+    // console.log(`[Beneish Debug] DSRI:${dsri.toFixed(2)} GMI:${gmi.toFixed(2)} AQI:${aqi.toFixed(2)} SGI:${sgi.toFixed(2)} DEPI:${depi.toFixed(2)} SGAI:${sgai.toFixed(2)} LVGI:${lvgi.toFixed(2)}`);
+  }
 
   return mScore;
 };

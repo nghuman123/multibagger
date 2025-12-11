@@ -4,6 +4,7 @@ import { getQuote as getFinnhubQuote } from "./api/finnhub";
 import { analyzeStock } from "./analyzer";
 import { AnalysisResult, StockQuote, MultiBaggerAnalysis } from "../types";
 import { parseJSON, safeGenerateContent } from "./ai/gemini";
+import { generateOllamaResponse } from "./ai/ollama";
 
 // Initialize Gemini Client for Chat operations
 // const apiKey = (typeof import.meta !== 'undefined' && import.meta.env ? import.meta.env.VITE_GEMINI_API_KEY : undefined) || process.env.VITE_GEMINI_API_KEY;
@@ -152,6 +153,20 @@ OUTPUT JSON SCHEMA:
  * Extracts institutional-grade data using Gemini + Google Search
  */
 export const extractInstitutionalData = async (ticker: string): Promise<any> => {
+
+  // [MOD] Local Provider Fallback for Tool Use
+  if (process.env.AI_PROVIDER === 'local' || process.env.AI_PROVIDER === 'ollama') {
+    console.log(`[Ollama] Skipping Google Search for ${ticker} (Not supported locally). Using internal knowledge.`);
+    // Construct a prompt that asks the LLM to provide what it knows or estimates
+    const localPrompt = `Provide financial data for ${ticker} based on your internal knowledge.\n\n${dataReqs}`;
+    try {
+      const resText = await generateOllamaResponse(localPrompt);
+      return parseJSON(resText || "{}");
+    } catch (e) {
+      console.error("[Ollama] Data Extraction Failed", e);
+      return null;
+    }
+  }
 
   try {
     const response = await safeGenerateContent({

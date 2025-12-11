@@ -68,6 +68,7 @@ export interface PriceHistoryData {
     sma200: number;
     week52High: number;
     week52Low: number;
+    benchmarkHistory?: { date: string; close: number }[]; // [NEW] SPY/QQQ
 }
 
 export interface TechnicalScore {

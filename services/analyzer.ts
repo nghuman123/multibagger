@@ -139,6 +139,13 @@ function applyProfitabilityCap(
   return capped;
 }
 
+const AI_SCORE_CAPS = {
+  STRONG_PASS_MAX: 12,    // Was 30
+  SOFT_PASS_MAX: 8,       // Was ~21
+  MONITOR_PENALTY: -5,    // Keep
+  AVOID_PENALTY: -10      // Keep
+};
+
 // Helper to integrate AI judgement with Quant Score
 function integrateAiAndQuant(
   quantScore: number,
@@ -154,22 +161,22 @@ function integrateAiAndQuant(
   if (!ai) return Math.max(0, Math.min(100, finalScore));
 
   const { aiStatus, aiConviction = 0, aiTier } = ai;
-  const maxBoost = 30; // Max boost points
 
   // 1) AI Boosts (STRONG_PASS / SOFT_PASS)
   if (aiStatus === 'STRONG_PASS') {
-    const boost = Math.round((aiConviction / 100) * maxBoost);
+    // Conviction 100% = +12, 50% = +6
+    const boost = Math.round((aiConviction / 100) * AI_SCORE_CAPS.STRONG_PASS_MAX);
     finalScore += boost;
     console.log(
-      `[Analyzer] AI STRONG_PASS boost: +${boost} (conviction=${aiConviction}%)`
+      `[Analyzer] AI STRONG_PASS boost: +${boost} (capped at ${AI_SCORE_CAPS.STRONG_PASS_MAX})`
     );
   }
 
   if (aiStatus === 'SOFT_PASS') {
-    const boost = Math.round((aiConviction / 100) * (maxBoost * 0.7)); // Max ~21
+    const boost = Math.round((aiConviction / 100) * AI_SCORE_CAPS.SOFT_PASS_MAX);
     finalScore += boost;
     console.log(
-      `[Analyzer] AI SOFT_PASS boost: +${boost} (conviction=${aiConviction}%)`
+      `[Analyzer] AI SOFT_PASS boost: +${boost} (capped at ${AI_SCORE_CAPS.SOFT_PASS_MAX})`
     );
   }
 
@@ -184,16 +191,21 @@ function integrateAiAndQuant(
       "IBM"
     ]);
 
-    let penalty = -10;
+    let penalty = AI_SCORE_CAPS.MONITOR_PENALTY;
 
+    // Optional: Keep large cap logic if desired, or stick to strict spec?
+    // Spec says "MONITOR_PENALTY: -5 (Keep)".
+    // Existing logic had bespoke softening for large caps. I'll preserve existing logic but base it on constant.
     if (marketCap && marketCap > 100_000_000_000) {
-      // Large caps: softer penalty
-      penalty = -5;
+      // Large caps: softer penalty (maybe 0 or -2?) - Let's stick to -5 default to follow spec "Keep"
+      // user spec says: "MONITOR_PENALTY: -5 // Keep"
+      // But code had logic. Let's simplfy to strict -5 unless user wants that large cap nuance.
+      // "Keep" implies preserve existing *values*, but the prompt shows -5.
+      // The prompt code snippet showed simple addition. I will trust the prompt's simplicity.
     }
 
     if (ticker && OPTIONALITY_TICKERS.has(ticker)) {
-      // Explicit manual softening for known optionality plays
-      penalty = Math.max(penalty, -5);
+      // penalty = Math.max(penalty, -5);
     }
 
     aiPenalty = penalty;
@@ -204,7 +216,7 @@ function integrateAiAndQuant(
   }
 
   if (aiStatus === 'AVOID') {
-    aiPenalty = -10;
+    aiPenalty = AI_SCORE_CAPS.AVOID_PENALTY;
     finalScore += aiPenalty;
     console.log(
       `[Analyzer] AVOID penalty: ${aiPenalty} (before=${finalScore - aiPenalty}, after=${finalScore})`
@@ -295,57 +307,58 @@ export const analyzeStock = async (ticker: string): Promise<MultiBaggerAnalysis 
   // We try to fetch what we can.
 
   // Helper to extract value from PromiseSettledResult
-  const getVal = <T>(res: PromiseSettledResult<T>): T | null => res.status === 'fulfilled' ? res.value : null;
-
+  // 2. Fetch Data in Parallel (Fail-Fast or All-Settled strategy)
+  // We use allSettled to be robust against one API failure
   const [
-    fmpProfileResult,
-    fmpQuoteResult,
-    // massiveQuoteResult, // [REMOVED]
-    // massiveProfileResult, // [REMOVED]
-    fmpIncomeResult,
-    fmpBalanceResult,
-    fmpCashFlowResult,
-    keyMetricsResult,
-    financialGrowthResult,
+    profileResult,
+    quoteResult,
+    incomeResult,
+    balanceResult,
+    cashFlowResult,
+    metricsResult,
     insiderTradesResult,
-    // massiveFinancialsResult, // [REMOVED]
-    fmpHistoryResult
+    growthResult,
+    priceHistoryResult,
+    spyHistoryResult // [NEW] Fetch Benchmark (SPY)
   ] = await Promise.allSettled([
     fmp.getCompanyProfile(ticker),
     fmp.getQuote(ticker),
-    // massive.getQuote(ticker), // [REMOVED]
-    // massive.getCompanyProfile(ticker), // [REMOVED]
-    fmp.getIncomeStatements(ticker, 12),
-    fmp.getBalanceSheets(ticker, 12),
-    fmp.getCashFlowStatements(ticker, 12),
+    fmp.getIncomeStatements(ticker),
+    fmp.getBalanceSheets(ticker),
+    fmp.getCashFlowStatements(ticker),
     fmp.getKeyMetrics(ticker),
-    fmp.getFinancialGrowth(ticker),
     fmp.getInsiderTrades(ticker),
-    // massive.getFinancials(ticker), // [REMOVED]
-    fmp.getHistoricalPrice(ticker, 365)
+    fmp.getFinancialGrowth(ticker),
+    fmp.getHistoricalPrice(ticker, 365), // 1 year daily candles
+    fmp.getHistoricalPrice('SPY', 365)   // [NEW] Benchmark
   ]);
 
-  const fmpProfile = getVal(fmpProfileResult);
-  const fmpQuote = getVal(fmpQuoteResult);
-  // const finnhubQuote = getVal(finnhubQuoteResult); // [DISABLED]
-  // const massiveQuote = getVal(massiveQuoteResult); // [REMOVED]
-  // const massiveProfile = getVal(massiveProfileResult); // [REMOVED]
-  // const finnhubProfile = getVal(finnhubProfileResult); // [DISABLED]
-  const fmpIncome = getVal(fmpIncomeResult) || [];
-  const fmpBalance = getVal(fmpBalanceResult) || [];
-  const fmpCashFlow = getVal(fmpCashFlowResult) || [];
-  const priceHistory: HistoricalPrice[] = getVal(fmpHistoryResult) || [];
+  // Extract Data (Helper to throw if critical missing)
+  const getVal = <T>(res: PromiseSettledResult<T>, name: string, required = true): T | null => {
+    if (res.status === 'fulfilled') return res.value;
+    if (required) throw new Error(`Missing required data: ${name}`);
+    console.warn(`[Warning] Missing optional data: ${name}`, res.reason);
+    return null;
+  };
 
-  const keyMetrics = getVal(keyMetricsResult) || null;
-  const financialGrowth = getVal(financialGrowthResult) || null;
-  const insiderTrades = getVal(insiderTradesResult) || [];
+  const profile = getVal(profileResult, 'Profile')!;
+  const quote = getVal(quoteResult, 'Quote')!;
+  const incomeStatements = getVal(incomeResult, 'Income')!;
+  const balanceSheets = getVal(balanceResult, 'Balance')!;
+  const cashFlows = getVal(cashFlowResult, 'CashFlow')!;
+  const keyMetrics = getVal(metricsResult, 'Metrics', false) || [];
+  const insiderTrades = getVal(insiderTradesResult, 'Insider') || [];
+  const financialGrowth = getVal(growthResult, 'Growth') || [];
+  const priceHistory = getVal(priceHistoryResult, 'PriceHistory', false) || [];
+  const spyHistory = getVal(spyHistoryResult, 'SPY', false) || []; // [NEW] Optional but preferred
   // const shortInterestData = getVal(shortInterestDataResult); // [DISABLED]
   // const finnhubMetrics = getVal(finnhubMetricsResult); // [DISABLED]
   // const massiveFinancials = getVal(massiveFinancialsResult); // [REMOVED]
 
-  // Prefer FMP
-  const quote = fmpQuote;
-  const profile = fmpProfile;
+  // Prefer FMP (Already extracted above as 'profile' and 'quote')
+  // Legacy Aliases for downstream code
+  // const quote = ... (Already declared)
+  // const profile = ... (Already declared)
 
   // If we have absolutely no data, fail.
   if (!profile || !quote) {
@@ -354,9 +367,9 @@ export const analyzeStock = async (ticker: string): Promise<MultiBaggerAnalysis 
   }
 
   // Consolidate Financials
-  const incomeStatements = fmpIncome;
-  const balanceSheets = fmpBalance;
-  const cashFlowStatements = (fmpCashFlow.length > 0) ? fmpCashFlow : [];
+  // const incomeStatements = ... (Already declared)
+  // const balanceSheets = ... (Already declared)
+  const cashFlowStatements = cashFlows; // Alias to match downstream usage
 
   const hasFinancials = incomeStatements.length > 0;
   // let hasFinnhubMetrics = !!finnhubMetrics; // [DISABLED]
@@ -405,16 +418,14 @@ export const analyzeStock = async (ticker: string): Promise<MultiBaggerAnalysis 
     ? profile.ceo
     : null;
 
-  if (ceoName) {
-    founderCheck = detectFounderStatus(
-      ceoName,
-      profile.companyName,
-      profile.description,
-      companyAge
-    );
-  } else {
-    founderCheck = { isFounder: false, reason: "CEO name unavailable" };
-  }
+  // Check founder status (always check, as we have manual overrides)
+  founderCheck = detectFounderStatus(
+    ceoName,
+    profile.companyName,
+    profile.description,
+    companyAge,
+    ticker
+  );
 
   console.log(`[Analyzer] Founder status for ${ticker}: ${founderCheck.isFounder} (${founderCheck.reason})`);
 
@@ -816,21 +827,23 @@ export const analyzeStock = async (ticker: string): Promise<MultiBaggerAnalysis 
 
   console.log(`[Analyzer] Quant score: ${multiBaggerScore.totalScore}/100`); // [NEW] Log correct score
 
-  // STEP 8: Technical Score
-  const priceHistoryData: PriceHistoryData = {
-    price: quote.price,
-    history: priceHistory,
-    sma200: 0, // Placeholder, will calculate if enough history
-    week52High: quote.yearHigh,
-    week52Low: quote.yearLow
-  };
+  // STEP // 5. Technical analysis
+  // STEP 5: Technical analysis
   // Better SMA200:
+  let calcSma200 = 0;
   if (priceHistory.length >= 200) {
     const sum = priceHistory.slice(0, 200).reduce((acc, p) => acc + p.close, 0);
-    priceHistoryData.sma200 = sum / 200;
+    calcSma200 = sum / 200;
   }
 
-  const technicalScore = computeTechnicalScore(priceHistoryData);
+  const technicalScore = computeTechnicalScore({
+    price: quote.price,
+    history: priceHistory,
+    sma200: calcSma200,
+    week52High: quote.yearHigh,
+    week52Low: quote.yearLow,
+    benchmarkHistory: spyHistory // [NEW]
+  });
 
   // STEP 9: Squeeze Setup
   const squeezeSetup = computeSqueezeSetup({

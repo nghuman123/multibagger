@@ -1,20 +1,24 @@
 import { GoogleGenAI } from "@google/genai";
 import type { VisionaryAnalysis, PatternMatch, SectorType, MoatThesisAnalysis, AntigravityResult } from '../../types';
 import { ANTIGRAVITY_SYSTEM_PROMPT } from './prompts/antigravityPrompt';
+import { generateOllamaResponse } from './ollama';
 import JSON5 from 'json5';
 
 // --- CONFIGURATION ---
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || process.env.API_KEY;
-if (!GEMINI_API_KEY) console.warn("GEMINI_API_KEY is not set");
+// Only warn if we are NOT in local mode
+if (!GEMINI_API_KEY && process.env.AI_PROVIDER !== 'local') console.warn("GEMINI_API_KEY is not set");
 
 // [CRITICAL FIX] Use specific stable model version, not 'latest'
 const GEMINI_MODEL = "gemini-2.0-flash-exp";
 
 let ai: any;
-try {
-  ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY || 'dummy_key' });
-} catch (e) {
-  console.warn("Gemini AI initialization failed:", e);
+if (GEMINI_API_KEY) {
+  try {
+    ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+  } catch (e) {
+    console.warn("Gemini AI initialization failed:", e);
+  }
 }
 
 // --- RATE LIMITING & RETRY ---
@@ -52,6 +56,35 @@ async function processQueue() {
 export const safeGenerateContent = async (params: any, retries = 3): Promise<any> => {
   return new Promise((resolve, reject) => {
     requestQueue.push(async () => {
+      // [MOD] OLLAMA SWITCH
+      // If provider is 'ollama' OR 'local', AND we are not using tools (search)
+      const useLocal = (process.env.AI_PROVIDER === 'ollama' || process.env.AI_PROVIDER === 'local');
+      const hasTools = params.config?.tools && params.config.tools.length > 0;
+
+      if (useLocal && !hasTools) {
+        try {
+          const systemInstruction = params.systemInstruction || "";
+          // Gemini 'contents' format: [{ role: 'user', parts: [{ text: ... }] }]
+          const userContent = params.contents?.[0]?.parts?.map((p: any) => p.text).join('\n') || "";
+
+          const ollamaText = await generateOllamaResponse(userContent, systemInstruction);
+
+          // Mock Gemini Response Structure
+          resolve({
+            text: ollamaText,
+            candidates: [{ content: { parts: [{ text: ollamaText }] } }]
+          });
+          return;
+        } catch (localErr) {
+          console.error("[SafeGenerate] Local AI Failed, falling back to Gemini if possible:", localErr);
+          // If local fails and we have no API key, we must fail here
+          if (!process.env.GEMINI_API_KEY) {
+            reject(localErr);
+            return;
+          }
+        }
+      }
+
       try {
         let attempt = 0;
         while (attempt < retries) {
@@ -60,7 +93,20 @@ export const safeGenerateContent = async (params: any, retries = 3): Promise<any
             if (!ai) throw new Error("AI Client not initialized");
 
             const result = await ai.models.generateContent(params);
-            resolve(result);
+
+            // Check if we need to call .text()
+            let textVal = "";
+            if (typeof result.response?.text === 'function') {
+              textVal = result.response.text();
+            } else {
+              textVal = JSON.stringify(result); // Fallback
+            }
+
+            // We return an object that HAS .text property for compatibility with our Ollama mock
+            resolve({
+              text: textVal,
+              original: result
+            });
             return;
           } catch (error: any) {
             // Check for 429

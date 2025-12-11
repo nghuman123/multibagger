@@ -181,7 +181,12 @@ export interface IncomeStatement {
   eps: number;
   epsdiluted: number;
   weightedAverageShsOut: number;
+  epsdiluted: number;
+  weightedAverageShsOut: number;
   weightedAverageShsOutDil: number;
+  // [NEW] Fields for Beneish M-Score
+  depreciationAndAmortization: number;
+  sellingGeneralAndAdministrativeExpenses: number;
 }
 
 export interface BalanceSheet {
@@ -197,6 +202,9 @@ export interface BalanceSheet {
   retainedEarnings: number;
   totalDebt: number;
   netDebt: number;
+  // [NEW] Fields for Beneish M-Score
+  netReceivables: number;
+  propertyPlantEquipmentNet: number;
 }
 
 export interface CashFlowStatement {

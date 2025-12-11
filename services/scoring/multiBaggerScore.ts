@@ -28,39 +28,77 @@ export const SECTOR_THRESHOLDS: Record<SectorType, SectorConfig> = {
 // 2. PILLAR IMPLEMENTATIONS
 // ============================================================================
 
+// [FIX 6] Dynamic CAGR for Recent IPOs
+function calculateDynamicCAGR(history: { date: string; value: number }[]): {
+    cagr: number;
+    yearsUsed: number;
+    isPartial: boolean;
+    penalty: number;
+} {
+    if (history.length < 2) {
+        return { cagr: 0, yearsUsed: 0, isPartial: true, penalty: -5 };
+    }
+
+    const latest = history[0].value;
+
+    // Try 3 years (12 quarters), then 2 years (8), then 1 year (4)
+    let oldestIndex: number;
+    let yearsUsed: number;
+    let penalty = 0;
+
+    if (history.length >= 12) {
+        oldestIndex = 11;
+        yearsUsed = 3;
+    } else if (history.length >= 8) {
+        oldestIndex = 7;
+        yearsUsed = 2;
+        penalty = -2;  // Slight penalty for less history
+    } else if (history.length >= 4) {
+        oldestIndex = 3;
+        yearsUsed = 1;
+        penalty = -4;  // Larger penalty for minimal history
+    } else {
+        oldestIndex = history.length - 1;
+        yearsUsed = history.length / 4;
+        penalty = -5;  // Max penalty for very limited data
+    }
+
+    const oldest = history[oldestIndex].value;
+
+    if (oldest <= 0 || yearsUsed <= 0) {
+        return { cagr: 0, yearsUsed: 0, isPartial: true, penalty: -5 };
+    }
+
+    const cagr = (Math.pow(latest / oldest, 1 / yearsUsed) - 1) * 100;
+
+    return {
+        cagr,
+        yearsUsed,
+        isPartial: yearsUsed < 3,
+        penalty
+    };
+}
+
 // --- Pillar A: Growth & TAM (35 pts) ---
 function scoreGrowthAndTAM(data: FundamentalData): PillarScore {
     let score = 0;
     const details: string[] = [];
 
-    // A1. 3-Year Revenue CAGR (15 pts)
-    // We need to calculate CAGR from revenueHistory. 
-    // Assuming revenueHistory is sorted descending by date (newest first).
-    // Ideally we want 3 years (12 quarters) of data.
+    // A1. Revenue CAGR (15 pts) - [FIX 6 Application]
     const history = data.revenueHistory;
-    let cagr = 0;
-
-    if (history.length >= 5) { // Need at least start and end points spanning ~1 year to estimate
-        // Simple CAGR estimation if we have enough data points.
-        // Let's use the oldest available data point up to 3 years back.
-        const latest = history[0].value;
-        const oldestIndex = Math.min(history.length - 1, 12); // Max 12 quarters (3 years)
-        const oldest = history[oldestIndex].value;
-        const years = oldestIndex / 4;
-
-        if (oldest > 0 && years > 0) {
-            cagr = (Math.pow(latest / oldest, 1 / years) - 1) * 100;
-        }
-    }
+    const cagrResult = calculateDynamicCAGR(history);
 
     let cagrScore = 0;
-    if (cagr >= 40) cagrScore = 15;
-    else if (cagr >= 25) cagrScore = 12;
-    else if (cagr >= 15) cagrScore = 8;
-    else if (cagr >= 10) cagrScore = 4;
+    if (cagrResult.cagr >= 40) cagrScore = 15;
+    else if (cagrResult.cagr >= 25) cagrScore = 12;
+    else if (cagrResult.cagr >= 15) cagrScore = 8;
+    else if (cagrResult.cagr >= 10) cagrScore = 4;
+
+    // Apply history penalty
+    cagrScore = Math.max(0, cagrScore + cagrResult.penalty);
 
     score += cagrScore;
-    details.push(`Revenue CAGR (~${cagr.toFixed(1)}%): +${cagrScore}/15`);
+    details.push(`Revenue CAGR (~${cagrResult.cagr.toFixed(1)}% over ${cagrResult.yearsUsed}yr${cagrResult.isPartial ? ' [PARTIAL]' : ''}): +${cagrScore}/15` + (cagrResult.penalty < 0 ? ` (Penalty ${cagrResult.penalty})` : ''));
 
     // A2. Growth Acceleration (10 pts)
     // Compare YoY growth of recent quarters.
@@ -94,14 +132,24 @@ function scoreGrowthAndTAM(data: FundamentalData): PillarScore {
     score += accelerationScore;
     details.push(`Growth Trend (${accelStatus}): +${accelerationScore}/10`);
 
-    // A3. TAM Penetration (10 pts)
+    // A3. TAM Penetration (10 pts) - [FIX 5 Application]
+    // <1% = very early, HIGH execution risk (prove yourself first)
+    // 1-5% = sweet spot (proven product-market fit, long runway)
+    // 5-10% = still good but accelerating competition
+    // >10% = mature, limited upside
     let tamScore = 0;
     switch (data.tamPenetration) {
-        case '1-5%': tamScore = 10; break;
-        case '<1%': tamScore = 6; break;
-        case '5-10%': tamScore = 6; break;
-        case '>10%': tamScore = 2; break;
+        case '1-5%': tamScore = 10; break;   // Sweet spot - proven + runway
+        case '5-10%': tamScore = 7; break;   // Good but more competitive
+        case '<1%': tamScore = 4; break;     // REDUCED: execution risk premium
+        case '>10%': tamScore = 2; break;    // Mature market
+        default: tamScore = 5; break;        // Unknown = neutral
     }
+
+    if (data.tamPenetration === '<1%') {
+        details.push('WARNING: <1% TAM penetration = high execution risk');
+    }
+
     score += tamScore;
     details.push(`TAM Penetration (${data.tamPenetration}): +${tamScore}/10`);
 
@@ -205,31 +253,52 @@ function scoreAlignment(data: FundamentalData): PillarScore {
 }
 
 // --- Pillar D: Valuation (10 pts) ---
+// [FIX 7] PSG Ratio with Growth Floor
+function scorePSG(psRatio: number, growthRate: number): { score: number; detail: string } {
+    // Guard: If growth is very low, PSG becomes meaningless
+    if (growthRate < 5) {
+        return { score: 0, detail: `PSG N/A: Growth < 5%` };
+    }
+
+    // Guard: If P/S is extremely high, penalize regardless of growth
+    if (psRatio > 30) {
+        return { score: 0, detail: `PSG N/A: P/S ${psRatio.toFixed(1)} too extreme` };
+    }
+
+    const psg = psRatio / growthRate;
+
+    let score = 0;
+    // Tighter thresholds to reduce growth bias
+    if (psg < 0.3) score = 5;        // Exceptional value
+    else if (psg <= 0.6) score = 4;  // Good value
+    else if (psg <= 1.0) score = 2;  // Fair value
+    else if (psg <= 1.5) score = 1;  // Getting expensive
+    else score = 0;                   // Too expensive
+
+    return {
+        score,
+        detail: `PSG Ratio (${psg.toFixed(2)}): +${score}/5 [P/S: ${psRatio.toFixed(1)}, Growth: ${growthRate.toFixed(0)}%]`
+    };
+}
+
+// --- Pillar D: Valuation (10 pts) ---
 function scoreValuation(data: FundamentalData): PillarScore {
     let score = 0;
     const details: string[] = [];
 
     // D1. PSG Ratio (5 pts)
     // PSG = P/S / Growth
-    let psg = 0;
-    if (data.revenueGrowthForecast > 0) {
-        psg = data.psRatio / data.revenueGrowthForecast;
-    } else if (data.revenueHistory.length >= 5) {
-        // Fallback to historical CAGR if forecast missing
-        // Re-calculate CAGR locally or pass it in?
-        // Let's assume forecast is populated or 0.
-        // If 0, try to use a proxy?
-        // Let's just stick to logic: if 0, psg is 0/undefined.
-    }
+    // Assuming data.revenueGrowthForecast is decimal (e.g. 0.20 for 20%), convert to percent.
+    // Fallback to historical growth if forecast is missing/zero.
+    let growthRate = (data.revenueGrowthForecast || data.revenueGrowth) * 100;
 
-    let psgScore = 0;
-    if (psg > 0) {
-        if (psg < 0.5) psgScore = 5;
-        else if (psg <= 1.0) psgScore = 4;
-        else if (psg <= 2.0) psgScore = 2; // Relaxed from 1.5
-    }
-    score += psgScore;
-    details.push(`PSG Ratio (${psg.toFixed(2)}): +${psgScore}/5`);
+    // Safety check: if growth rate seems to be already scaled (e.g. > 100 implies >10000% growth or already scaled?)
+    // FMP usually returns 0.25. If it returned 25, 2500% would be wild but possible.
+    // We assume decimal input from FMP.
+
+    const psgResult = scorePSG(data.psRatio, growthRate);
+    score += psgResult.score;
+    details.push(psgResult.detail);
 
     // D2. Valuation Trend (5 pts)
     let valTrendScore = 2; // Default Neutral
@@ -302,27 +371,26 @@ export function computeMultiBaggerScore(data: FundamentalData): MultiBaggerScore
 
     let totalScore = growth.score + economics.score + alignment.score + valuation.score + catalysts.score;
 
-    // --- QUALITY + GROWTH BONUS ---
+    // --- QUALITY + GROWTH BONUS (FIX 4: Reduced & Mutually Exclusive) ---
     // Reward elite compounders that might be expensive or have low insider % due to size.
+
+    let appliedBonus = 0;
+    let bonusReason = '';
 
     // 1. Capital Efficiency Bonus (Target: AAPL, MSFT)
     // High ROE, High FCF Margin, Positive Growth
-    let capitalEfficiencyBonus = 0;
+    // [MOD] Reduced from 15 to 8
     const isCapitalEfficient = (data.roe >= 0.35) && (data.fcfMargin >= 0.25) && (data.revenueGrowth >= 0.05);
 
     if (isCapitalEfficient) {
-        capitalEfficiencyBonus = 15;
-        totalScore += capitalEfficiencyBonus;
-        console.log(`[CapitalEfficiency] ${data.ticker}: ROE=${data.roe.toFixed(2)}, FCF=${data.fcfMargin.toFixed(2)}, Growth=${data.revenueGrowth.toFixed(2)} -> BONUS APPLIED`);
-    } else {
-        console.log(`[CapitalEfficiency] ${data.ticker}: ROE=${data.roe.toFixed(2)}, FCF=${data.fcfMargin.toFixed(2)}, Growth=${data.revenueGrowth.toFixed(2)} -> No Bonus`);
+        appliedBonus = 8;
+        bonusReason = 'Capital Efficiency';
     }
 
     // 2. SaaS/Cloud Compounder Bonus (Target: DDOG, ZS, CRWD, SNOW)
     // Deterministic check: High CAGR, High Recent Growth, High Gross Margin
-    let saasBonus = 0;
-    // Extract CAGR from growth pillar details or recalculate? 
-    // Let's recalculate locally to be safe and deterministic.
+    // [MOD] Reduced from 20 to 10
+    // Recalculate CAGR locally
     let cagr3y = 0;
     if (data.revenueHistory.length >= 5) {
         const latest = data.revenueHistory[0].value;
@@ -337,27 +405,33 @@ export function computeMultiBaggerScore(data: FundamentalData): MultiBaggerScore
     const gm = data.grossMargin ?? 0;
     const isSaasCompounder = (cagr3y >= 25) && (data.revenueGrowth * 100 >= 20) && (gm >= 70);
 
-    if (isSaasCompounder) {
-        saasBonus = 20;
-        totalScore += saasBonus;
-        console.log(`[GrowthBonus] ${data.ticker}: CAGR3y=${cagr3y.toFixed(1)}%, LastGrowth=${(data.revenueGrowth * 100).toFixed(1)}%, GM=${gm.toFixed(1)}% -> BONUS APPLIED`);
+    // Apply SaaS bonus if it beats current bonus (10 > 8)
+    if (isSaasCompounder && 10 > appliedBonus) {
+        appliedBonus = 10;
+        bonusReason = 'SaaS Compounder';
+    }
+
+    // 3. Quality Bonus (Fallback)
+    // Only apply if no other bonus applied
+    const isHighQuality = (data.roic && data.roic > 15) || (gm > 60);
+    const isHighGrowth = (growth.score >= 8);
+
+    if (data.isProfitable && isHighQuality && isHighGrowth && appliedBonus === 0) {
+        appliedBonus = 5;
+        bonusReason = 'Quality Growth';
+    }
+
+    // Apply single highest bonus
+    totalScore += appliedBonus;
+
+    if (appliedBonus > 0) {
+        console.log(`[Bonus] ${data.ticker}: +${appliedBonus} (${bonusReason})`);
     } else {
         // Debug for key SaaS names
         const debugSaas = ['DDOG', 'ZS', 'CRWD', 'SNOW', 'SHOP'].includes(data.ticker);
         if (debugSaas) {
-            console.log(`[GrowthBonus] ${data.ticker}: CAGR3y=${cagr3y.toFixed(1)}%, LastGrowth=${(data.revenueGrowth * 100).toFixed(1)}%, GM=${gm.toFixed(1)}% -> No Bonus`);
+            console.log(`[Bonus] ${data.ticker}: No Bonus (CAGR3y=${cagr3y.toFixed(1)}%, Eff=${isCapitalEfficient})`);
         }
-    }
-
-    // Legacy Quality Bonus (Keep small or remove if redundant? keeping small for now as backup)
-    let qualityBonus = 0;
-    const isHighQuality = (data.roic && data.roic > 15) || (gm > 60);
-    const isHighGrowth = (growth.score >= 8);
-
-    if (data.isProfitable && isHighQuality && isHighGrowth && !isCapitalEfficient && !isSaasCompounder) {
-        // Only apply if not already boosted by the big bonuses
-        qualityBonus = 5;
-        totalScore += qualityBonus;
     }
 
     // Cap at 100
@@ -369,7 +443,7 @@ export function computeMultiBaggerScore(data: FundamentalData): MultiBaggerScore
     else if (totalScore >= 55) tier = 'Tier 3';
 
     const summary = `
-    Total Score: ${totalScore}/100 (${tier}) [CapEff: +${capitalEfficiencyBonus}, SaaS: +${saasBonus}, Qual: +${qualityBonus}]
+    Total Score: ${totalScore}/100 (${tier}) [Bonus: +${appliedBonus} (${bonusReason})]
     ----------------------------------------
     A. Growth & TAM: ${growth.score}/35
     B. Economics:    ${economics.score}/25

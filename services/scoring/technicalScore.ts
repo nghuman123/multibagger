@@ -17,26 +17,43 @@ const scoreRelativeStrength = (data: PriceHistoryData): { score: number; detail:
         return { score: 0, detail: 'Insufficient history for RS check' };
     }
 
-    // Sort history by date descending (newest first) just in case, or assume caller provides it sorted.
-    // Let's assume sorted Newest -> Oldest for consistency with other parts, or Oldest -> Newest.
-    // Standard convention in this app seems to be mixed, but let's assume we can find 1 year ago.
-    // Actually, let's just use the price change if provided, or calc from history.
-    // Let's assume history[0] is newest.
-
     const current = data.price;
     const oneYearAgo = data.history[Math.min(data.history.length - 1, 250)].close;
 
     if (oneYearAgo === 0) return { score: 0, detail: 'Invalid history data' };
 
-    const perf = ((current - oneYearAgo) / oneYearAgo) * 100;
+    const stockPerf = ((current - oneYearAgo) / oneYearAgo) * 100;
+
+    // [MOD] Benchmarking Logic
+    let benchmarkPerf = 0;
+    let hasBenchmark = false;
+
+    if (data.benchmarkHistory && data.benchmarkHistory.length >= 250) {
+        const benchCurrent = data.benchmarkHistory[0].close;
+        const benchYearAgo = data.benchmarkHistory[Math.min(data.benchmarkHistory.length - 1, 250)].close;
+        if (benchYearAgo > 0) {
+            benchmarkPerf = ((benchCurrent - benchYearAgo) / benchYearAgo) * 100;
+            hasBenchmark = true;
+        }
+    }
+
+    // "True" Relative Strength = Stock Delta - Benchmark Delta
+    // If no benchmark, we fall back to absolute > 20% rule but strictly (maybe assumed market is 10%?)
+    // Let's rely on Relative Strength if possible.
+    const relativeStrength = hasBenchmark ? (stockPerf - benchmarkPerf) : (stockPerf - 10); // Assume 10% market baseline if missing
 
     let score = 0;
-    if (perf > 20) score = 10;
-    else if (perf >= 5) score = 7;
-    else if (perf >= 0) score = 3;
-    else score = 0;
+    if (relativeStrength > 20) score = 10;      // Crushing market
+    else if (relativeStrength >= 5) score = 7;  // Beating market
+    else if (relativeStrength >= 0) score = 3;  // Matching
+    else if (relativeStrength >= -10) score = 1;// Lagging slightly
+    else score = 0;                             // Underperforming
 
-    return { score, detail: `12-Month Performance: ${perf.toFixed(1)}% (+${score}/10)` };
+    const detailText = hasBenchmark
+        ? `RS vs SPY: ${relativeStrength.toFixed(1)}% (Stock: ${stockPerf.toFixed(1)}%, SPY: ${benchmarkPerf.toFixed(1)}%) (+${score}/10)`
+        : `Rel Perf (Est): ${relativeStrength.toFixed(1)}% (Stock: ${stockPerf.toFixed(1)}%) (+${score}/10)`;
+
+    return { score, detail: detailText };
 };
 
 // 2. Above 200-Day Moving Average (0-10)

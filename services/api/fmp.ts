@@ -30,7 +30,7 @@ export interface CompanyMeta {
 }
 
 const FMP_BASE = process.env.FMP_BASE_URL || 'https://financialmodelingprep.com/stable';
-const API_KEY = (typeof import.meta !== 'undefined' && import.meta.env ? import.meta.env.VITE_FMP_API_KEY : undefined) || process.env.VITE_FMP_API_KEY;
+const API_KEY = (typeof import.meta !== 'undefined' && import.meta.env ? import.meta.env.VITE_FMP_API_KEY : undefined) || process.env.VITE_FMP_API_KEY || process.env.FMP_API_KEY;
 
 // Cache TTLs
 const TTL_PROFILE = 30 * 24 * 60 * 60 * 1000; // 30 days
@@ -69,7 +69,9 @@ const fetchData = async <T>(endpoint: string): Promise<T> => {
 
   return fetchWithRetry(async () => {
     const hasQuery = endpoint.includes('?');
-    const url = `${FMP_BASE}${endpoint}${hasQuery ? '&' : '?'}apikey=${API_KEY}`;
+    const isAbsolute = endpoint.startsWith('http');
+    const base = isAbsolute ? '' : FMP_BASE;
+    const url = `${base}${endpoint}${hasQuery ? '&' : '?'}apikey=${API_KEY}`;
     console.log(`Fetching FMP: ${endpoint} with key length: ${API_KEY?.length}`);
     // console.log('[FMP FULL URL]', url); // Debug log
 
@@ -87,7 +89,8 @@ const fetchData = async <T>(endpoint: string): Promise<T> => {
     }
 
     if (res.status === 404) {
-      throw new ApiError('NOT_FOUND', 'Resource not found');
+      console.warn(`[FMP] Resource not found: ${endpoint}`);
+      return null as T;
     }
 
     if (!res.ok) {
@@ -187,10 +190,17 @@ export const getQuote = async (symbol: string): Promise<StockQuote | null> => {
   }
 };
 
+// FMP returns { symbol: "AAPL", historical: [...] }
 export async function getHistoricalPrice(symbol: string, days: number = 365): Promise<HistoricalPrice[]> {
-  return fetchData<HistoricalPrice[]>(
-    `/historical-price-full?symbol=${symbol}&timeseries=${days}`,
-  );
+  try {
+    const data = await fetchData<{ historical: HistoricalPrice[] }>(
+      `/historical-price-eod/full?symbol=${symbol}`
+    );
+    return data?.historical || [];
+  } catch (error) {
+    console.error(`Error fetching historical price for ${symbol}:`, error);
+    return [];
+  }
 }
 
 export const getIncomeStatements = async (symbol: string, limit = 12): Promise<IncomeStatement[]> => {
@@ -284,7 +294,7 @@ export const getFinancialGrowth = async (symbol: string): Promise<FinancialGrowt
 
 export const getInsiderTrades = async (symbol: string): Promise<InsiderTrade[]> => {
   try {
-    const data = await fetchData<InsiderTrade[]>(`/insider-trading?symbol=${symbol}&limit=50`);
+    const data = await fetchData<InsiderTrade[]>(`/insider-trading/search?symbol=${symbol}&limit=50`);
     return data || [];
   } catch (error) {
     return [];
