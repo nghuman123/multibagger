@@ -436,6 +436,12 @@ export interface MultiBaggerAnalysis {
 
   // New fields for AnalysisResult parity
   aiScore: number;
+  grades?: {
+    quality: string;
+    growth: string;
+    valuation: string;
+    momentum: string;
+  };
   bonuses: string[];
   aiAnalysis: {
     moat: {
@@ -456,4 +462,124 @@ export interface MultiBaggerAnalysis {
   warningFull?: string;
 }
 
-export * from './src/types/antigravity';
+// ============ INSTITUTIONAL UPGRADE TYPES ============
+
+export interface StockMetricData {
+  // === EXISTING FIELDS (keep all) ===
+  peRatio?: number | null;
+  pegRatio?: number | null;
+  priceToSales?: number | null; // [new]
+  evToEbitda?: number | null;
+  evToSales?: number | null;
+  pbRatio?: number | null;
+
+  revenueGrowth?: number | null;      // YoY %
+  grossMargin?: number | null;        // %
+  operatingMargin?: number | null;    // %
+  netMargin?: number | null;          // %
+
+  roe?: number | null;                // %
+  roic?: number | null;               // %
+
+  debtToEquity?: number | null;
+  debtToEbitda?: number | null;
+  interestCoverage?: number | null;
+  currentRatio?: number | null;
+  quickRatio?: number | null;
+
+  fcfYield?: number | null;
+  payoutRatio?: number | null;
+
+  insiderPct?: number | null;
+  institutionalPct?: number | null;
+  shortInterestPct?: number | null;
+
+  // === NEW: GROWTH DYNAMICS ===
+  revenueGrowthQ1?: number | null;      // YoY growth 1 quarter ago
+  revenueGrowthQ2?: number | null;      // YoY growth 2 quarters ago
+  revenueGrowthQ3?: number | null;      // YoY growth 3 quarters ago
+  growthAcceleration?: 'Accelerating' | 'Stable' | 'Decelerating';
+
+  // === NEW: SAAS METRICS ===
+  dbnr?: number | null;                 // Dollar-Based Net Retention (e.g., 125 for 125%)
+  nrr?: number | null;                  // Net Revenue Retention
+  arr?: number | null;                  // Annual Recurring Revenue ($M)
+  rpo?: number | null;                  // Remaining Performance Obligations ($M)
+  rpoGrowth?: number | null;            // RPO YoY Growth %
+
+  // === NEW: RULE OF 40 ===
+  ruleOf40Score?: number | null;        // Revenue Growth % + FCF Margin %
+
+  // === NEW: CAPITAL EFFICIENCY ===
+  shareCountGrowth3Y?: number | null;   // 3-year share dilution CAGR %
+  sbcAsPercentRevenue?: number | null;  // Stock-Based Comp / Revenue %
+  capitalEfficiencyRatio?: number | null; // ARR Added / Cash Burned
+
+  // === NEW: QUALITY METRICS ===
+  accrualsRatio?: number | null;        // (Net Income - FCF) / Total Assets
+  fScore?: number | null;               // Piotroski F-Score (0-9)
+  altmanZ?: number | null;              // Altman Z-Score (bankruptcy risk)
+  fcfConversion?: number | string | null;
+
+  // === NEW: RELATIVE VALUATION ===
+  pePercentile5Y?: number | null;       // Current P/E percentile vs 5-year range (0-100)
+  evSalesPercentile5Y?: number | null;  // Current EV/Sales percentile (0-100)
+  evGpRatio?: number | null;            // EV / Gross Profit (for SaaS)
+
+  // === NEW: MARKET DYNAMICS ===
+  tamEstimate?: number | null;          // Total Addressable Market ($B)
+  marketSharePct?: number | null;       // Current market share %
+  tamPenetration?: number | null;       // Revenue / TAM %
+
+  // === NEW: INSTITUTIONAL ===
+  institutionalOwnership?: number | null;
+  institutionalChange13F?: number | null; // QoQ change in inst ownership %
+  analystCount?: number | null;
+  avgPriceTarget?: number | null;
+  priceTargetUpside?: number | null;    // % upside to avg PT
+  epsRevisionTrend?: string | null;
+}
+
+export interface StockCompany {
+  // === EXISTING FIELDS (keep all) ===
+  ticker: string;
+  name: string;
+  sector: string;
+  businessModel?: string;
+  marketCap?: string | number;
+  price?: number;
+  isUptrend?: boolean;
+  recommendation?: string;
+
+  metrics?: StockMetricData;
+  moat?: string;
+  risks?: string;
+
+  // === NEW: COMPOSITE SCORES ===
+  multibaggerScore?: number;            // 0-100 composite score
+  qualityGrade?: 'A' | 'B' | 'C' | 'D' | 'F';
+  growthGrade?: 'A' | 'B' | 'C' | 'D' | 'F';
+  valuationGrade?: 'A' | 'B' | 'C' | 'D' | 'F';
+  momentumGrade?: 'A' | 'B' | 'C' | 'D' | 'F';
+
+  // === NEW: MOAT BREAKDOWN ===
+  moatScore?: number;                   // 0-10 quantitative moat score
+  moatSources?: {
+    networkEffects: number;             // 0-3
+    switchingCosts: number;             // 0-2
+    intangibleAssets: number;           // 0-2
+    costAdvantage: number;              // 0-2
+    efficientScale: number;             // 0-1
+  };
+
+  // === NEW: RISK METRICS ===
+  riskScore?: number;                   // 0-100 (higher = riskier)
+  dilutionRisk?: 'Low' | 'Medium' | 'High';
+  executionRisk?: 'Low' | 'Medium' | 'High';
+  competitionRisk?: 'Low' | 'Medium' | 'High';
+
+  verdictReason?: string;
+  cyclePosition?: string;
+  thesisBreaker?: string;
+  factorScore?: string;
+}

@@ -1,13 +1,14 @@
 import { GoogleGenAI } from "@google/genai";
 import type { VisionaryAnalysis, PatternMatch, SectorType, MoatThesisAnalysis, AntigravityResult } from '../../types';
 import { ANTIGRAVITY_SYSTEM_PROMPT } from './prompts/antigravityPrompt';
+import JSON5 from 'json5';
 
 // --- CONFIGURATION ---
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || process.env.API_KEY;
 if (!GEMINI_API_KEY) console.warn("GEMINI_API_KEY is not set");
 
 // [CRITICAL FIX] Use specific stable model version, not 'latest'
-const GEMINI_MODEL = "gemini-2.5-flash";
+const GEMINI_MODEL = "gemini-2.0-flash-exp";
 
 let ai: any;
 try {
@@ -16,48 +17,133 @@ try {
   console.warn("Gemini AI initialization failed:", e);
 }
 
+// --- RATE LIMITING & RETRY ---
+const RATE_LIMIT_DELAY = 6000; // 6 seconds min between requests (10 RPM = 1 req/6s)
+let lastRequestTime = 0;
+const requestQueue: (() => Promise<void>)[] = [];
+let isProcessingQueue = false;
+
+async function processQueue() {
+  if (isProcessingQueue) return;
+  isProcessingQueue = true;
+
+  while (requestQueue.length > 0) {
+    const task = requestQueue.shift();
+    if (task) {
+      const now = Date.now();
+      const timeSinceLast = now - lastRequestTime;
+      const wait = Math.max(0, RATE_LIMIT_DELAY - timeSinceLast);
+
+      if (wait > 0) {
+        await new Promise(r => setTimeout(r, wait));
+      }
+
+      try {
+        await task();
+      } catch (e) {
+        console.error("Queue task error", e);
+      }
+      lastRequestTime = Date.now();
+    }
+  }
+  isProcessingQueue = false;
+}
+
+export const safeGenerateContent = async (params: any, retries = 3): Promise<any> => {
+  return new Promise((resolve, reject) => {
+    requestQueue.push(async () => {
+      try {
+        let attempt = 0;
+        while (attempt < retries) {
+          try {
+            // Validate AI instance
+            if (!ai) throw new Error("AI Client not initialized");
+
+            const result = await ai.models.generateContent(params);
+            resolve(result);
+            return;
+          } catch (error: any) {
+            // Check for 429
+            if (error.status === 429 || (error.message && error.message.includes('429'))) {
+              console.warn(`[AI] Rate Limit 429. Retrying in ${(attempt + 1) * 5}s...`);
+              await new Promise(r => setTimeout(r, (attempt + 1) * 5000));
+              attempt++;
+              continue;
+            }
+            throw error;
+          }
+        }
+        reject(new Error("Max Retries Exceeded for AI Error"));
+      } catch (err) {
+        reject(err);
+      }
+    });
+    processQueue();
+  });
+};
+
 // --- HELPER: Nuclear JSON Parser ---
 export function parseJSON<T = any>(raw: string): T | null {
   if (!raw) return null;
 
-  try {
-    // 1. Remove Markdown code blocks entirely
-    let text = raw.replace(/```json/g, '').replace(/```/g, '');
+  // [DEBUG] Log raw output to catch weird formatting
+  console.log("[DEBUG] Raw AI Output (First 100):", raw.substring(0, 100) + "...");
 
-    // 2. Find the first '{' or '[' to ignore preambles
+  try {
+    // 1. Remove Markdown code blocks entirely (regex handles leading space)
+    let text = raw.replace(/```[a-zA-Z]*\n?/g, '').replace(/```/g, '');
+
+    // 2. Find the first '{' or '['
     const firstBrace = text.indexOf('{');
     const firstBracket = text.indexOf('[');
 
     let start = -1;
     let end = -1;
+    let isObject = false;
 
     // Detect if Object or Array
     if (firstBrace !== -1 && (firstBracket === -1 || firstBrace < firstBracket)) {
       start = firstBrace;
-      end = text.lastIndexOf('}');
+      isObject = true;
     } else if (firstBracket !== -1) {
       start = firstBracket;
-      end = text.lastIndexOf(']');
+      isObject = false;
+    }
+
+    // 3. Smart Extraction (Bracket Counting)
+    // This handles cases like "{...} {...}" by stopping at the first valid closure.
+    if (start !== -1) {
+      let openCount = 0;
+      const openChar = isObject ? '{' : '[';
+      const closeChar = isObject ? '}' : ']';
+
+      for (let i = start; i < text.length; i++) {
+        const char = text[i];
+        if (char === openChar) {
+          openCount++;
+        } else if (char === closeChar) {
+          openCount--;
+          if (openCount === 0) {
+            end = i;
+            break;
+          }
+        }
+      }
     }
 
     if (start !== -1 && end !== -1) {
       text = text.substring(start, end + 1);
     }
 
-    // 3. "Nuclear" Clean: Remove all newlines and tabs (JSON doesn't need them)
-    // This fixes "Invalid control character" errors inside strings
-    text = text.replace(/[\r\n\t]+/g, ' ');
+    // [DEBUG] Log cleaned text
+    console.log("[DEBUG] Cleaned Text (First 100):", text.substring(0, 100) + "...");
+    console.log("[DEBUG] Cleaned Text (Last 20):", text.substring(Math.max(0, text.length - 20)));
 
-    // 4. Fix common AI JSON syntax errors
-    text = text
-      .replace(/,\s*}/g, '}')   // Trailing comma in object
-      .replace(/,\s*]/g, ']')   // Trailing comma in array
-      .replace(/\\(?!["\\/bfnrtu])/g, '\\\\'); // Escape bad backslashes
-
-    return JSON.parse(text) as T;
+    // 4. Try JSON5 parse first (most permissive)
+    return JSON5.parse(text) as T;
   } catch (err) {
-    // Only log if it's not a "safe" failure
-    console.error(`[Gemini] JSON Parse Failed. Preview: ${raw.substring(0, 50)}...`);
+    console.warn(`[Gemini] JSON5 Parse Failed:`, err);
+    console.error(`[Gemini] Final Parse Failed. Raw Preview: ${raw.substring(0, 50)}...`);
     return null;
   }
 }
@@ -122,7 +208,7 @@ export const analyzeVisionaryLeadership = async (ticker: string, ceoName: string
   const task = `Analyze leadership for ${ticker} (CEO: ${ceoName}). Score 1-10 on Bezos Test dimensions.`;
 
   try {
-    const res = await ai.models.generateContent({
+    const res = await safeGenerateContent({
       model: GEMINI_MODEL,
       systemInstruction: STRICT_JSON_SYSTEM_PROMPT,
       contents: [{ role: "user", parts: [{ text: `TASK: ${task}\n\nSCHEMA:\n${schema}` }] }],
@@ -158,7 +244,7 @@ export const findHistoricalPattern = async (ticker: string, sector: SectorType, 
   const task = `Compare ${ticker} (Sector: ${sector}, Cap: $${(marketCap / 1e9).toFixed(1)}B, Growth: ${revenueGrowth}%, GM: ${grossMargin}%) to historical winners.`;
 
   try {
-    const res = await ai.models.generateContent({
+    const res = await safeGenerateContent({
       model: GEMINI_MODEL,
       systemInstruction: STRICT_JSON_SYSTEM_PROMPT,
       contents: [{ role: "user", parts: [{ text: `TASK: ${task}\n\nSCHEMA:\n${schema}` }] }],
@@ -193,7 +279,7 @@ export const analyzeMoatAndThesis = async (ticker: string, description: string):
   const task = `Analyze moat for ${ticker}. Score 1-10.`;
 
   try {
-    const res = await ai.models.generateContent({
+    const res = await safeGenerateContent({
       model: GEMINI_MODEL,
       systemInstruction: STRICT_JSON_SYSTEM_PROMPT,
       contents: [{ role: "user", parts: [{ text: `TASK: ${task}\n\nSCHEMA:\n${schema}` }] }],
@@ -221,7 +307,7 @@ export const extractCatalysts = async (ticker: string): Promise<string[]> => {
   const task = `Find upcoming catalysts for ${ticker} (Earnings, FDA, Product Launches).`;
 
   try {
-    const res = await ai.models.generateContent({
+    const res = await safeGenerateContent({
       model: GEMINI_MODEL,
       systemInstruction: STRICT_JSON_SYSTEM_PROMPT,
       contents: [{ role: "user", parts: [{ text: `TASK: ${task}\n\nSCHEMA:\n${schema}` }] }],
@@ -256,7 +342,7 @@ export const analyzeQualitativeFactors = async (ticker: string, companyName: str
   const task = `Qualitative analysis for ${companyName} (${ticker}).`;
 
   try {
-    const res = await ai.models.generateContent({
+    const res = await safeGenerateContent({
       model: GEMINI_MODEL,
       systemInstruction: STRICT_JSON_SYSTEM_PROMPT,
       contents: [{ role: "user", parts: [{ text: `TASK: ${task}\n\nSCHEMA:\n${schema}` }] }],
@@ -292,7 +378,7 @@ export const getFinancialEstimates = async (ticker: string) => {
   const task = `Estimate financials for ${ticker}. Use 0 if unavailable.`;
 
   try {
-    const res = await ai.models.generateContent({
+    const res = await safeGenerateContent({
       model: GEMINI_MODEL,
       systemInstruction: STRICT_JSON_SYSTEM_PROMPT,
       contents: [{ role: "user", parts: [{ text: `TASK: ${task}\n\nSCHEMA:\n${schema}` }] }],
@@ -310,7 +396,7 @@ export const getFinancialEstimates = async (ticker: string) => {
 
 export const analyzeAntigravity = async (inputData: any): Promise<AntigravityResult> => {
   try {
-    const res = await ai.models.generateContent({
+    const res = await safeGenerateContent({
       model: GEMINI_MODEL,
       systemInstruction: STRICT_JSON_SYSTEM_PROMPT,
       contents: [

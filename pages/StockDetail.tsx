@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { INITIAL_STOCKS } from '../constants';
 import StockChart from '../components/StockChart';
+import { MultibaggerBadge, GradeDisplay } from '../components/StockCard';
 import DataQualityPanel from '../components/DataQualityPanel';
 import DataQualityBadge, { QualityState } from '../components/DataQualityBadge';
 import { AnalysisSkeleton } from '../components/LoadingSkeleton';
@@ -159,8 +160,8 @@ const StockDetail: React.FC = () => {
                      {String(displayChange)}
                   </div>
                   {aiAnalysis && (
-                     <div className="mt-2 text-sm text-gray-400 font-mono">
-                        Score: <span className="text-white font-bold">{aiAnalysis.score}</span> / 100
+                     <div className="mt-2">
+                        <MultibaggerBadge score={aiAnalysis.score} />
                      </div>
                   )}
                </div>
@@ -193,36 +194,24 @@ const StockDetail: React.FC = () => {
                {/* Left Column: The Why & Thesis */}
                <div className="lg:col-span-2 space-y-6">
 
-                  {/* "The Why" Score Breakdown */}
+                  {/* "The Why" Score Breakdown - Replaced by Institutional Scorecard */}
                   <div className="bg-gray-900 rounded-xl border border-gray-800 p-6 shadow-lg">
                      <h3 className="text-lg font-bold text-white mb-4 flex items-center">
                         <Target className="mr-2 text-primary-400" />
-                        The Why: Score Breakdown
+                        Institutional Scorecard
                      </h3>
 
-                     <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-                        <div className="bg-gray-950 p-4 rounded-lg border border-gray-800 text-center">
-                           <div className="text-gray-400 text-xs uppercase mb-1">Quant Score</div>
-                           <div className="text-2xl font-bold text-white">{aiAnalysis.multiBaggerScore.totalScore}</div>
-                        </div>
-                        <div className="bg-gray-950 p-4 rounded-lg border border-gray-800 text-center relative">
-                           <div className="text-gray-400 text-xs uppercase mb-1">AI Impact</div>
-                           <div className={`text-2xl font-bold ${aiAnalysis.aiScore >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                              {aiAnalysis.aiScore > 0 ? '+' : ''}{aiAnalysis.aiScore}
-                           </div>
-                           {aiAnalysis.aiScore > 0 && <div className="absolute top-2 right-2 text-green-500"><TrendingUp size={12} /></div>}
-                        </div>
-                        <div className="bg-gray-950 p-4 rounded-lg border border-gray-800 text-center">
-                           <div className="text-gray-400 text-xs uppercase mb-1">Risk Penalty</div>
-                           <div className="text-2xl font-bold text-red-400">{aiAnalysis.riskFlags.riskPenalty}</div>
-                        </div>
+                     <div className="mb-6">
+                        <GradeDisplay
+                           quality={aiAnalysis.grades?.quality || 'C'}
+                           growth={aiAnalysis.grades?.growth || 'C'}
+                           valuation={aiAnalysis.grades?.valuation || 'C'}
+                           momentum={aiAnalysis.grades?.momentum || 'C'}
+                        />
                      </div>
 
                      <div className="bg-gray-950/50 p-3 rounded border border-gray-800 font-mono text-xs text-center text-gray-400">
-                        {aiAnalysis.multiBaggerScore.totalScore} (Quant)
-                        {aiAnalysis.aiScore >= 0 ? ' + ' : ' - '} {Math.abs(aiAnalysis.aiScore)} (AI)
-                        {' - '} {Math.abs(aiAnalysis.riskFlags.riskPenalty)} (Risk)
-                        {' = '} <span className="text-white font-bold">{aiAnalysis.score}</span>
+                        {aiAnalysis.multiBaggerScore?.summary || "See thesis for details."}
                      </div>
                   </div>
 

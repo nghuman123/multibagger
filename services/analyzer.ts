@@ -10,12 +10,17 @@ import { calculateQuantitativeScore } from './scoring/quantScore.ts';
 import { calculateRiskFlags } from './scoring/riskFlags.ts';
 import * as gemini from './ai/gemini.ts';
 import { detectFounderStatus } from './utils/founderDetection.ts';
+import { extractInstitutionalData } from './geminiService.ts'; // [NEW] Wrapper for data extraction
 import { computeMultiBaggerScore } from './scoring/multiBaggerScore.ts';
+
+import { calculateMultibaggerScore, validateMetrics } from './scoringService.ts'; // [NEW] Institutional Scoring
+
 import { computeTechnicalScore } from './scoring/technicalScore.ts';
 import { computeSqueezeSetup } from './scoring/squeezeSetup.ts';
-import { calcValuationScore } from './scoring/valuationScore.ts'; // [NEW]
+// import { calcValuationScore } from './scoring/valuationScore.ts'; // [REPLACED by scoringService]
 import { calcTTM } from './utils/financialUtils.ts';
-import type { MultiBaggerAnalysis, SectorType, DataQuality, TechnicalScore, SqueezeSetup, HistoricalPrice } from '../types.ts';
+
+import type { MultiBaggerAnalysis, SectorType, DataQuality, TechnicalScore, SqueezeSetup, HistoricalPrice, MultiBaggerScore } from '../types.ts';
 import type { AntigravityResult } from '../src/types/antigravity.ts'; // [NEW] Explicit import
 import { PriceHistoryData } from '../src/types/scoring.ts';
 import { TIER_THRESHOLDS } from '../config/scoringThresholds.ts';
@@ -639,18 +644,97 @@ export const analyzeStock = async (ticker: string): Promise<MultiBaggerAnalysis 
   // Ideally we should port the quantScore logic to populate FundamentalData correctly.
   // For now, using defaults/placeholders as per previous step.
 
-  const multiBaggerScore = computeMultiBaggerScore(fundamentalData);
+  // -------------------------------------------------------------------------
+  // [INSTITUTIONAL UPGRADE] New Scoring Engine Integration
+  // -------------------------------------------------------------------------
 
-  // [NEW] Valuation Scoring (PEG / PSG)
-  const valuationMetrics = {
-    pe: quote.pe || keyMetrics?.peRatio || null,
-    ps: quote.priceToSales || keyMetrics?.priceToSalesRatio || null,
-    revenueCagr3y: quantScore.revenueGrowth3YrCAGR ? quantScore.revenueGrowth3YrCAGR / 100 : 0,
-    epsCagr3y: financialGrowth?.epsgrowth ? financialGrowth.epsgrowth : null // Approximate
+  // 1. Construct StockMetricData from FMP + Estimates
+  // We prioritize FMP data, but allow Gemini overrides if we fetched them.
+  // Note: For deep institutional metrics (DBNR, etc.), we would need `extractInstitutionalData`.
+  // For now, we map what we have.
+
+  // Fetch Institutional Data (Optional: enable if API cost allows)
+  // const instData = await gemini.extractInstitutionalData(ticker); 
+  // For now, let's assume we rely on existing FMP unless we want to burn tokens.
+  // To strictly follow the "Expand Data Extraction" task, we SHOULD call it.
+  const instData = await extractInstitutionalData(ticker);
+
+  const stockMetrics: import('../types').StockMetricData = {
+    // Existing/FMP
+    peRatio: quote.pe,
+    priceToSales: quote.priceToSales, // [FIX] Updated field name
+    grossMargin: fundamentalData.grossMargin,
+    operatingMargin: effectiveFinnhubMetrics?.operatingMargin ?? (incomeStatements[0]?.operatingIncomeRatio * 100), // [FIX] Typo
+    roe: roe * 100, // fundamentalData.roe is 0-1
+    roic: fundamentalData.roic, // already 0-100 if present
+
+    // New / Institutional (merged from instData if available)
+    revenueGrowth: revenueGrowth * 100, // 0-1 -> %
+    revenueGrowthQ1: instData?.metrics?.revenueGrowthQ1 ?? (financialGrowth?.revenueGrowth ? financialGrowth.revenueGrowth * 100 : null),
+    revenueGrowthQ2: instData?.metrics?.revenueGrowthQ2 ?? null,
+    growthAcceleration: instData?.metrics?.growthAcceleration ?? 'Stable',
+
+    dbnr: instData?.metrics?.dbnr ?? null,
+    ruleOf40Score: instData?.metrics?.ruleOf40Score ?? null,
+    rpoGrowth: instData?.metrics?.rpoGrowth ?? null,
+
+    shareCountGrowth3Y: instData?.metrics?.shareCountGrowth3Y ?? null,
+    sbcAsPercentRevenue: instData?.metrics?.sbcAsPercentRevenue ?? null,
+
+    accrualsRatio: instData?.metrics?.accrualsRatio ?? null,
+    fScore: instData?.metrics?.fScore ?? null,
+
+    pePercentile5Y: instData?.metrics?.pePercentile5Y ?? null,
+    evSalesPercentile5Y: instData?.metrics?.evSalesPercentile5Y ?? null,
+
+    tamPenetration: instData?.metrics?.tamPenetration ?? ((qualitativeAnalysis as any)?.tamPenetration ? parseFloat((qualitativeAnalysis as any).tamPenetration) : null) // [FIX] Cast and safe parse
+
   };
-  const valuationScore = calcValuationScore(valuationMetrics);
-  multiBaggerScore.totalScore += valuationScore;
-  console.log(`[Analyzer] Valuation Score: ${valuationScore} (Total Quant: ${multiBaggerScore.totalScore})`);
+
+  const rawCompany: Partial<import('../types').StockCompany> = {
+    ticker,
+    name: profile.companyName,
+    sector: sector,
+    businessModel: profile.description, // rough proxy
+    moat: instData?.moat ?? moatData?.oneLineThesis ?? "Unspecified", // [FIX] Use moatData
+    isUptrend: quote.price > ((quote as any).priceAvg200 || 0) // [FIX] Use quote fallback or 0
+
+  };
+
+  // 2. Calculate New Score
+  const newScoreResult = calculateMultibaggerScore(rawCompany, stockMetrics);
+
+  // 3. Map back to legacy `MultiBaggerScore` structure for UI compatibility
+  // The new engine returns a flat `StockCompany` partial with scores.
+  // We need to shape it into `MultiBaggerScore` interface: { totalScore, pillars: {...} }
+
+  const multiBaggerScore: MultiBaggerScore = {
+    totalScore: newScoreResult.multibaggerScore || 0,
+    tier: (newScoreResult.multibaggerScore || 0) >= 80 ? 'Tier 1' : (newScoreResult.multibaggerScore || 0) >= 65 ? 'Tier 2' : 'Tier 3',
+    // We construct "pillars" artificially or use the breakdowns
+    pillars: {
+      growth: { score: (newScoreResult.growthGrade === 'A' ? 35 : newScoreResult.growthGrade === 'B' ? 25 : 10), maxScore: 35, details: [`Grade: ${newScoreResult.growthGrade}`] },
+      economics: { score: (newScoreResult.qualityGrade === 'A' ? 25 : newScoreResult.qualityGrade === 'B' ? 15 : 5), maxScore: 25, details: [`Grade: ${newScoreResult.qualityGrade}`] },
+      alignment: { score: 10, maxScore: 20, details: ["Included in composite"] }, // Simplified
+      valuation: { score: (newScoreResult.valuationGrade === 'A' ? 10 : 5), maxScore: 10, details: [`Grade: ${newScoreResult.valuationGrade}`] },
+      catalysts: { score: 5, maxScore: 10, details: ["Included in composite"] }
+    },
+    summary: newScoreResult.verdictReason || " Institutional Analysis"
+  };
+
+  // [NEW] Populate grades for UI
+  const grades = {
+    quality: newScoreResult.qualityGrade || 'C',
+    growth: newScoreResult.growthGrade || 'C',
+    valuation: newScoreResult.valuationGrade || 'C',
+    momentum: newScoreResult.momentumGrade || 'C'
+  };
+
+  // console.log(`[Analyzer] Quant score: ${multiBaggerScore.totalScore}/100`); // [REMOVED]
+
+
+  // [REMOVED] Legacy Valuation Scoring Block (now part of calculateMultibaggerScore)
+
 
   // Helper to normalize text to lines (Bugfix for .split error)
   const normalizeToLines = (value: unknown): string[] => {
@@ -1006,6 +1090,9 @@ export const analyzeStock = async (ticker: string): Promise<MultiBaggerAnalysis 
     rawScore, // [NEW] include raw score
     score: finalScore, // Alias
     verdict,
+
+    // [NEW]
+    grades: grades,
 
     // New Fields
     aiScore,

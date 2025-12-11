@@ -32,8 +32,8 @@ const run = async () => {
 
     await Promise.all(uniqueTickers.map(ticker => limit(async () => {
         try {
-            // 1. Throttle: Wait 2 seconds between stocks
-            await delay(2000);
+            // 1. Throttle: Wait 10 seconds between stocks to respect Gemini Flash 10 RPM limit
+            await delay(10000);
 
             // 2. Analyze (Silence internal logs ONLY if batch mode)
             const originalLog = console.log;
