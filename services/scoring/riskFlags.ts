@@ -412,11 +412,10 @@ export const calculateRiskFlags = (
     altmanZScore,
     shortInterestPct,
     disqualified,
-    disqualifyReasons: hardKillFlags, // Map hard kills to reasons for backward compat if needed, or just use new fields
+    disqualifyReasons: hardKillFlags.length > 0 ? hardKillFlags : warningFlags.filter(w => w.includes("Paper Tiger") || w.includes("Beneish")), // Priority reasons
     warnings: warningFlags,
     riskPenalty, // New field
-    qualityOfEarnings: qoe.status,
-    fcfConversionRatio: qoe.conversionRatio,
+    qualityOfEarnings: (latestIncome?.netIncome > 0 && latestCashFlow?.operatingCashFlow < 0) ? 'Warn' : 'Pass',
     consecutiveNegativeFcfQuarters: qoe.consecutiveNegative
   };
 };

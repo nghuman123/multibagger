@@ -242,12 +242,17 @@ export interface KeyMetrics {
 export interface InsiderTrade {
   symbol: string;
   transactionDate: string;
-  reportingName: string;
-  transactionType: string; // "P-Purchase", "S-Sale"
+  reportingCik: string;
+  transactionType: string;
   securitiesTransacted: number;
   price: number;
-  value: number;
-  securityName: string;
+  securitiesOwned: number;
+  acquistionOrDisposition?: string; // FMP sometimes has typo
+  acquisitionOrDisposition?: string; // Correct spelling just in case
+  formType: string;
+  filingDate: string;
+  reportingName: string;
+  typeOfOwner: string;
 }
 
 export interface FinancialGrowth {
@@ -373,8 +378,8 @@ export interface QuantitativeScore {
   ruleOf40Value: number;
   insiderOwnershipPct: number;
   founderLed: boolean;
-  netInsiderBuying180Days: number;
-  priceToSales: number;
+  netInsiderBuying: 'Buying' | 'Selling' | 'Neutral' | 'Cluster Buy';
+  institutionalOwnershipPct: number;
   psgRatio: number;
 }
 

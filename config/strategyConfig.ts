@@ -57,5 +57,12 @@ export const STRATEGY = {
         RS_ALPHA_HIGH: 5,
         RS_ALPHA_POSITIVE: 0,
         RS_ALPHA_DRAG: -10
+    },
+
+    // SPECIAL CATEGORIES
+    SAAS_COMPOUNDER: {
+        MIN_CAGR: 25, // %
+        MIN_REV_GROWTH: 20, // %
+        MIN_GROSS_MARGIN: 70 // %
     }
 };

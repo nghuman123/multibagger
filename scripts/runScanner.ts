@@ -100,8 +100,18 @@ const run = async () => {
             const totalScoreSum = top20.reduce((sum: number, r: any) => sum + r.finalScore, 0);
 
             top20.forEach((r: any) => {
-                const weight = (r.finalScore / totalScoreSum) * 100;
-                portfolioTable.push([r.ticker, r.finalScore.toString(), weight.toFixed(2) + '%']);
+                let rawAlloc = (r.finalScore / totalScoreSum) * 100;
+
+                // [NEW] Volatility Adjustment (Kelly Lite)
+                // If Beta > 2.0, halve the position size
+                const beta = r.beta || 1.0;
+                let adjustmentNote = "";
+                if (beta > 2.0) {
+                    rawAlloc = rawAlloc * 0.5;
+                    adjustmentNote = ` (Vol Adj. β=${beta.toFixed(1)})`;
+                }
+
+                portfolioTable.push([r.ticker, r.finalScore.toString(), `${rawAlloc.toFixed(1)}%${adjustmentNote}`]);
             });
 
             console.log(portfolioTable.toString());

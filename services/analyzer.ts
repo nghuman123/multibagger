@@ -430,42 +430,86 @@ export const analyzeStock = async (ticker: string): Promise<MultiBaggerAnalysis 
 
   console.log(`[Analyzer] Founder status for ${ticker}: ${founderCheck.isFounder} (${founderCheck.reason})`);
 
-  // Insider Ownership Estimation
-  const insiderOwnershipPct = 0; // Placeholder
+  // Insider Ownership Estimation (Placeholder or use keyMetrics if reliable, FMP profile usually has vol/mktcap, not %. We use Computed metrics)
+  const insiderOwnershipPct = 0;
 
-  // STEP 4: Calculate quantitative score
-  let quantScore;
-  if (hasFinancials || effectiveFinnhubMetrics) {
-    quantScore = calculateQuantitativeScore(
-      incomeStatements,
-      financialGrowth,
-      keyMetrics,
-      insiderTrades,
-      sector,
-      founderCheck.isFounder,
-      insiderOwnershipPct,
-      effectiveFinnhubMetrics
+  // [NEW] Insider Cluster Detection
+  // Detects if multiple unique insiders bought within a short window (14 days)
+  let insiderClusterDetected = false;
+  let uniqueInsidersBuying = 0;
+
+  if (insiderTrades && insiderTrades.length > 0) {
+    const recentBuys = insiderTrades.filter(t =>
+      (t.transactionType === 'P-Purchase' || t.acquistionOrDisposition === 'A') &&
+      new Date(t.transactionDate).getTime() > Date.now() - (180 * 24 * 60 * 60 * 1000)
     );
-  } else {
-    quantScore = {
-      compositeScore: 50,
-      revenueGrowth3YrCAGR: 0,
-      grossMargin: 0,
-      lastQuarterGrowth: 0,
-      grossMarginTrend: 'Stable' as const,
-      ruleOf40Value: 0,
-      insiderOwnershipPct: 0,
-      founderLed: false,
-      netInsiderBuying180Days: 0,
-      priceToSales: 0,
-      psgRatio: 0,
-      growthScore: 0,
-      qualityScore: 0,
-      ruleOf40Score: 0,
-      insiderScore: 0,
-      valuationScore: 0
-    };
+
+    // Group by 2-week windows
+    // Simple approach: Check if any 14-day window has >= 2 unique buyers
+    const buyers = new Set<string>();
+    recentBuys.forEach(t => buyers.add(t.reportingCik));
+    uniqueInsidersBuying = buyers.size;
+
+    if (uniqueInsidersBuying >= 2) {
+      // Refine: Are they clustered?
+      // Sort buys by date
+      recentBuys.sort((a, b) => new Date(a.transactionDate).getTime() - new Date(b.transactionDate).getTime());
+
+      for (let i = 0; i < recentBuys.length; i++) {
+        const start = new Date(recentBuys[i].transactionDate).getTime();
+        const windowEnd = start + (14 * 24 * 60 * 60 * 1000);
+        const clusterBuilders = new Set<string>();
+        clusterBuilders.add(recentBuys[i].reportingCik);
+
+        for (let j = i + 1; j < recentBuys.length; j++) {
+          const curr = new Date(recentBuys[j].transactionDate).getTime();
+          if (curr <= windowEnd) {
+            clusterBuilders.add(recentBuys[j].reportingCik);
+          } else {
+            break;
+          }
+        }
+        if (clusterBuilders.size >= 2) {
+          insiderClusterDetected = true;
+          break;
+        }
+      }
+    }
   }
+
+  // STEP 4: Calculate Basic Metrics (Replacement for QuantScore)
+  // We need these for AI context and Valuation Gap before running the full MultiBagger score.
+
+  // 1. CAGR (3Y)
+  let revenueGrowth3YrCAGR = 0;
+  if (incomeStatements.length >= 13) { // 3 years + 1 qtr
+    const current = incomeStatements[0].revenue;
+    const old = incomeStatements[12].revenue;
+    if (old > 0) revenueGrowth3YrCAGR = (Math.pow(current / old, 1 / 3) - 1) * 100;
+  } else if (effectiveFinnhubMetrics?.revenueGrowth3Y) {
+    revenueGrowth3YrCAGR = effectiveFinnhubMetrics.revenueGrowth3Y;
+  }
+
+  // 2. Gross Margin (TTM or latest)
+  let grossMargin = (incomeStatements[0]?.grossProfitRatio || 0) * 100;
+  if (grossMargin === 0 && effectiveFinnhubMetrics?.grossMargin) {
+    grossMargin = effectiveFinnhubMetrics.grossMargin;
+  }
+
+  // 3. Last Year Growth
+  let revenueGrowth = 0;
+  if (incomeStatements.length >= 5) {
+    const current = incomeStatements[0].revenue;
+    const old = incomeStatements[4].revenue;
+    if (old > 0) revenueGrowth = (current - old) / old;
+  } else if (effectiveFinnhubMetrics?.revenueGrowthTTMYoy) {
+    revenueGrowth = effectiveFinnhubMetrics.revenueGrowthTTMYoy / 100;
+  }
+
+  // Clean up legacy placeholders
+  // quantScore was removed.
+
+
 
   // console.log(`[Analyzer] Quant score: ${quantScore.compositeScore}/100`); // [REMOVED] Legacy log confusing
 
@@ -562,10 +606,11 @@ export const analyzeStock = async (ticker: string): Promise<MultiBaggerAnalysis 
       positiveCatalysts: []
     };
   } else {
+    // AI Analysis (Metrics aleady calculated in Step 4)
     [visionaryAnalysis, qualitativeAnalysis, patternMatch, moatData, antigravityReport] = await Promise.all([
       gemini.analyzeVisionaryLeadership(ticker, profile.ceo),
       gemini.analyzeQualitativeFactors(ticker, profile.companyName, sector),
-      gemini.findHistoricalPattern(ticker, sector, quote.marketCap, quantScore.revenueGrowth3YrCAGR, quantScore.grossMargin),
+      gemini.findHistoricalPattern(ticker, sector, quote.marketCap, revenueGrowth3YrCAGR, grossMargin),
       gemini.analyzeMoatAndThesis(ticker, profile.description),
       gemini.analyzeAntigravity({
         ticker,
@@ -573,7 +618,24 @@ export const analyzeStock = async (ticker: string): Promise<MultiBaggerAnalysis 
         sector,
         marketCap: quote.marketCap || profile.mktCap || 0,
         description: profile.description,
-        quantScore,
+        quantScore: {
+          compositeScore: 50, // Dummy
+          revenueGrowth3YrCAGR,
+          grossMargin,
+          lastQuarterGrowth: 0,
+          grossMarginTrend: 'Stable',
+          ruleOf40Value: 0,
+          insiderOwnershipPct,
+          founderLed: founderCheck.isFounder,
+          netInsiderBuying180Days: 0,
+          priceToSales: 0,
+          psgRatio: 0,
+          growthScore: 0,
+          qualityScore: 0,
+          ruleOf40Score: 0,
+          insiderScore: 0,
+          valuationScore: 0
+        },
         riskFlags
       })
     ]);
@@ -602,15 +664,18 @@ export const analyzeStock = async (ticker: string): Promise<MultiBaggerAnalysis 
   const fcfMargin = ttmRevenue > 0 ? ttmFreeCashFlow / ttmRevenue : 0; // 0.25 = 25%
 
   // Revenue Growth (TTM vs Prior TTM)
-  let revenueGrowth = 0;
-  if (incomeStatements.length >= 5) {
-    const currentTTM = incomeStatements.slice(0, 4).reduce((sum, q) => sum + q.revenue, 0);
-    const priorTTM = incomeStatements.slice(4, 8).reduce((sum, q) => sum + q.revenue, 0);
-    if (priorTTM > 0) {
-      revenueGrowth = (currentTTM - priorTTM) / priorTTM;
+  // [REFACTOR] Use revenueGrowth calculated in Step 4, or verify here.
+  // If we want to be robust, we can keep the logic but assign to existing variable without 'let'.
+  if (revenueGrowth === 0) {
+    if (incomeStatements.length >= 5) {
+      const currentTTM = incomeStatements.slice(0, 4).reduce((sum, q) => sum + q.revenue, 0);
+      const priorTTM = incomeStatements.slice(4, 8).reduce((sum, q) => sum + q.revenue, 0);
+      if (priorTTM > 0) {
+        revenueGrowth = (currentTTM - priorTTM) / priorTTM;
+      }
+    } else if (financialGrowth) {
+      revenueGrowth = financialGrowth.revenueGrowth;
     }
-  } else if (financialGrowth) {
-    revenueGrowth = financialGrowth.revenueGrowth;
   }
 
   const fundamentalData: import('../src/types/scoring').FundamentalData = {
@@ -635,17 +700,18 @@ export const analyzeStock = async (ticker: string): Promise<MultiBaggerAnalysis 
     revenueType: qualitativeAnalysis.revenueType as any,
     roic: (keyMetrics?.roic ? keyMetrics.roic * 100 : null),
     isProfitable: (incomeStatements[0]?.netIncome || 0) > 0,
+    isProfitable: (incomeStatements[0]?.netIncome || 0) > 0,
     insiderOwnershipPct: insiderOwnershipPct,
     founderLed: founderCheck.isFounder,
-    netInsiderBuying: 'Neutral', // Needs logic
+    netInsiderBuying: insiderClusterDetected ? 'Cluster Buy' : 'Neutral', // [MODIFIED] Pass Cluster signal
     institutionalOwnershipPct: 50, // Placeholder
     psRatio: quote.priceToSales || (keyMetrics?.priceToSalesRatio) || 0,
     peRatio: quote.pe || (keyMetrics?.peRatio) || null,
     forwardPeRatio: quote.pe || null, // Proxy
     revenueGrowthForecast: 0, // Needs logic
     catalystDensity: qualitativeAnalysis.catalystDensity as any,
-    asymmetryScore: qualitativeAnalysis.asymmetryScore as any,
-    pricingPower: qualitativeAnalysis.pricingPower as any,
+    asymmetryScore: qualitativeAnalysis?.asymmetryScore || 'Low',
+    pricingPower: qualitativeAnalysis?.pricingPower || 'Weak',
     // [TASK 1] New fields for bonuses
     roe: roe,
     fcfMargin: fcfMargin,
@@ -862,7 +928,7 @@ export const analyzeStock = async (ticker: string): Promise<MultiBaggerAnalysis 
   // [NEW] Reverse DCF (Implied Growth)
   const peForDcf = quote.pe || keyMetrics?.peRatio || 0;
   const impliedGrowth = calculateImpliedGrowth(peForDcf);
-  const actualGrowth = quantScore.revenueGrowth3YrCAGR; // Use 3Y Revenue CAGR as proxy for "Actual"
+  const actualGrowth = revenueGrowth3YrCAGR; // [MOD] V2: sourced from multiBaggerScore.computedMetrics
   const valuationGap = (impliedGrowth !== null) ? (actualGrowth - impliedGrowth) : null;
 
   if (impliedGrowth !== null) {
@@ -1105,6 +1171,10 @@ export const analyzeStock = async (ticker: string): Promise<MultiBaggerAnalysis 
     modifiedScorecard.catalystSummary = antigravityReport.catalystSummary;
   }
 
+  // [NEW] Volatility Adjusted Sizing
+  // If Beta > 2.0, reduce conviction or allocation hint
+  const beta = profile.beta || 1.0;
+
   // STEP 11: Compile Result
   const result: MultiBaggerAnalysis = {
     ticker,
@@ -1122,6 +1192,8 @@ export const analyzeStock = async (ticker: string): Promise<MultiBaggerAnalysis 
     suggestedPositionSize,
 
     riskFlags,
+    // Pass Beta for Scanner Sizing
+    beta: beta,
     visionaryAnalysis: visionaryAnalysis || { longTermScore: 0, customerScore: 0, innovationScore: 0, capitalScore: 0, totalVisionaryScore: 0, ceoName: profile.ceo, explanation: "AI Error" },
     patternMatch: patternMatch || { matchScore: 0, similarTo: "None", keyParallels: [], keyDifferences: [] },
     antigravityResult: modifiedScorecard,
