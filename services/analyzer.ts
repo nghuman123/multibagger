@@ -5,23 +5,21 @@
 
 import * as fmp from './api/fmp.ts';
 // import * as finnhub from './api/finnhub.ts'; // [DISABLED]
-// import * as massive from './api/massive.ts'; // [REMOVED]
-// import { calculateQuantitativeScore } from './scoring/quantScore.ts'; // [REMOVED]
 import { calculateRiskFlags } from './scoring/riskFlags.ts';
 import * as gemini from './ai/gemini.ts';
 import { detectFounderStatus } from './utils/founderDetection.ts';
 import { extractInstitutionalData } from './geminiService.ts'; // [NEW] Wrapper for data extraction
 import { computeMultiBaggerScore } from './scoring/multiBaggerScore.ts';
+import { getCache, setCache } from './utils/cache.ts'; // [FIX 28] Caching
 
-import { calculateMultibaggerScore, validateMetrics } from './scoringService.ts'; // [NEW] Institutional Scoring
+// [REMOVED] Legacy scoringService
 import { calculateImpliedGrowth } from './scoring/valuationScore.ts'; // [NEW]
 
 import { computeTechnicalScore } from './scoring/technicalScore.ts';
 import { computeSqueezeSetup } from './scoring/squeezeSetup.ts';
-// import { calcValuationScore } from './scoring/valuationScore.ts'; // [REPLACED by scoringService]
 import { calcTTM } from './utils/financialUtils.ts';
 
-import type { MultiBaggerAnalysis, SectorType, DataQuality, TechnicalScore, SqueezeSetup, HistoricalPrice, MultiBaggerScore } from '../types.ts';
+import type { MultiBaggerAnalysis, SectorType, DataQuality, TechnicalScore, SqueezeSetup, HistoricalPrice, MultiBaggerScore, FundamentalData } from '../types.ts';
 import type { AntigravityResult } from '../src/types/antigravity.ts'; // [NEW] Explicit import
 import { PriceHistoryData } from '../src/types/scoring.ts';
 import { TIER_THRESHOLDS } from '../config/scoringThresholds.ts';
@@ -151,98 +149,7 @@ const AI_SCORE_CAPS = {
   AVOID_PENALTY: -5       // Keep penalty for "Avoid"
 };
 
-// Helper: Filter AI integration
-function integrateAiAndQuant(
-  quantScore: number,
-  riskPenalty: number,
-  ai: AntigravityResult | undefined,
-  ticker?: string,
-  marketCap?: number
-): number {
-  // Quant score is now the PRIMARY truth.
-  let finalScore = quantScore + (riskPenalty || 0);
-
-  if (!ai) return Math.max(0, Math.min(100, finalScore));
-
-  const { aiStatus } = ai;
-
-  // [FIX 20] No Boosts for PASS/STRONG_PASS.
-  // Only Penalties for Negative Outlooks.
-
-  if (aiStatus === 'MONITOR_ONLY') {
-    // ... penalty logic matching existing ...
-    // Hardcoded simplified logic for brevity of this Block Replacement
-    finalScore += AI_SCORE_CAPS.MONITOR_PENALTY;
-    console.log(`[Analyzer] AI MONITOR_ONLY penalty: ${AI_SCORE_CAPS.MONITOR_PENALTY}`);
-  } else if (aiStatus === 'AVOID') {
-    finalScore += AI_SCORE_CAPS.AVOID_PENALTY;
-    console.log(`[Analyzer] AI AVOID penalty: ${AI_SCORE_CAPS.AVOID_PENALTY}`);
-  }
-
-  return Math.max(0, Math.min(100, finalScore));
-}
-
-// 2) AI Penalties (AVOID / MONITOR_ONLY)
-// [CALIBRATION 2.5] Soften MONITOR_ONLY Penalty
-if (aiStatus === 'MONITOR_ONLY') {
-  const OPTIONALITY_TICKERS = new Set([
-    "BABA",
-    "DIS",
-    "PYPL",
-    "FCX",
-    "IBM"
-  ]);
-
-  let penalty = AI_SCORE_CAPS.MONITOR_PENALTY;
-
-  // Optional: Keep large cap logic if desired, or stick to strict spec?
-  // Spec says "MONITOR_PENALTY: -5 (Keep)".
-  // Existing logic had bespoke softening for large caps. I'll preserve existing logic but base it on constant.
-  if (marketCap && marketCap > 100_000_000_000) {
-    // Large caps: softer penalty (maybe 0 or -2?) - Let's stick to -5 default to follow spec "Keep"
-    // user spec says: "MONITOR_PENALTY: -5 // Keep"
-    // But code had logic. Let's simplfy to strict -5 unless user wants that large cap nuance.
-    // "Keep" implies preserve existing *values*, but the prompt shows -5.
-    // The prompt code snippet showed simple addition. I will trust the prompt's simplicity.
-  }
-
-  if (ticker && OPTIONALITY_TICKERS.has(ticker)) {
-    // penalty = Math.max(penalty, -5);
-  }
-
-  aiPenalty = penalty;
-  finalScore += aiPenalty;
-  console.log(
-    `[MonitorOnlyPenalty] ${ticker}: applying ${penalty} (before=${finalScore - aiPenalty}, status=MONITOR_ONLY)`
-  );
-}
-
-if (aiStatus === 'AVOID') {
-  aiPenalty = AI_SCORE_CAPS.AVOID_PENALTY;
-  finalScore += aiPenalty;
-  console.log(
-    `[Analyzer] AVOID penalty: ${aiPenalty} (before=${finalScore - aiPenalty}, after=${finalScore})`
-  );
-}
-
-// 3) Penalty Cap
-// Cap total penalties (risk + AI) at -20 for non-disqualified stocks
-if (aiTier !== 'Disqualified') {
-  const totalPenalty = (riskPenalty || 0) + (aiPenalty || 0); // Both are negative usually
-
-  if (totalPenalty < -20) {
-    const refund = -20 - totalPenalty; // e.g. -20 - (-30) = 10
-    finalScore += refund;
-    console.log(
-      `[Analyzer] Penalty cap applied: total penalties ${totalPenalty} -> -20 (refunded ${refund})`
-    );
-  }
-}
-
-// [MODIFIED] Do NOT clamp here. Return raw value to allow rawScore tracking.
-// Clamping will happen at the very end of analyzeStock.
-return Math.round(finalScore);
-}
+// [REMOVED] integrateAiAndQuant - Superseded by direct penalties in analyzer loop
 
 // Map FMP sectors to our sector types
 const mapSector = (fmpSector: string, industry: string): SectorType => {
@@ -263,14 +170,36 @@ const mapSector = (fmpSector: string, industry: string): SectorType => {
 // Founder Led Override Map (Source of Truth)
 
 
-// Determine verdict based on scores
+// [FIX 23] Determine Macro Regime
+const determineMacroRegime = (spyHistory: HistoricalPrice[], tnxHistory: HistoricalPrice[]): 'Bull' | 'Bear' | 'Neutral' => {
+  if (!spyHistory.length || spyHistory.length < 200) return 'Neutral';
+
+  // 1. Calculate SPY 200 SMA
+  const spyCloses = spyHistory.slice(0, 200).map(c => c.close);
+  const spySma200 = spyCloses.reduce((a, b) => a + b, 0) / spyCloses.length;
+  const spyCurrent = spyHistory[0].close;
+
+  // 2. Calculate TNX Trend (Optional context, maybe just use SPY)
+  // Rising rates = Headwind.
+  // For now, Regime is determined by Market Trend (SPY).
+
+  if (spyCurrent > spySma200) return 'Bull';
+  return 'Bear';
+};
+
 const determineVerdict = (
   multiBaggerScore: number,
   disqualified: boolean,
-  tier: string
+  tier: string,
+  macroRegime: 'Bull' | 'Bear' | 'Neutral' = 'Neutral'
 ): MultiBaggerAnalysis['verdict'] => {
   if (disqualified) return 'Disqualified';
-  if (tier === 'Tier 1') return 'Strong Buy';
+
+  // [FIX 23] Macro Overlay: Be stricter in Bear markets
+  const scoreThreshold = macroRegime === 'Bear' ? 85 : 80; // Raise bar to 85 for Tier 1 in Bear
+
+  if (multiBaggerScore >= scoreThreshold) return 'Strong Buy'; // Elite
+  if (tier === 'Tier 1') return 'Buy'; // Was Strong Buy, now just Buy if macro is meh
   if (tier === 'Tier 2') return 'Buy';
   if (tier === 'Tier 3') return 'Watch';
   return 'Pass';
@@ -288,11 +217,16 @@ const mapScoreToTier = (score: number, disqualified: boolean): MultiBaggerAnalys
 
 const determinePositionSize = (
   tier: string,
-  disqualified: boolean
+  disqualified: boolean,
+  macroRegime: 'Bull' | 'Bear' | 'Neutral' = 'Neutral'
 ): string => {
   if (disqualified) return '0% (Disqualified)';
-  if (tier === 'Tier 1') return '5-8%';
-  if (tier === 'Tier 2') return '3-5%';
+
+  // [FIX 23] Reduce sizing in Bear markets
+  const adjust = (size: string) => macroRegime === 'Bear' ? `Half Size ${size}` : size;
+
+  if (tier === 'Tier 1') return adjust('5-8%');
+  if (tier === 'Tier 2') return adjust('3-5%');
   if (tier === 'Tier 3') return '1-3%';
   return '0%';
 };
@@ -338,7 +272,9 @@ export const analyzeStock = async (ticker: string, referenceDate?: Date): Promis
     insiderTradesResult,
     growthResult,
     priceHistoryResult,
-    spyHistoryResult // [NEW] Fetch Benchmark (SPY)
+    spyHistoryResult, // [NEW] Fetch Benchmark (SPY)
+    tnxHistoryResult, // [FIX 23] Fetch TNX
+    executivesResult // [FIX 22]
   ] = await Promise.allSettled([
     fmp.getCompanyProfile(ticker),
     fmp.getQuote(ticker),
@@ -349,7 +285,9 @@ export const analyzeStock = async (ticker: string, referenceDate?: Date): Promis
     fmp.getInsiderTrades(ticker),
     fmp.getFinancialGrowth(ticker),
     fmp.getHistoricalPrice(ticker, 365), // 1 year daily candles
-    fmp.getHistoricalPrice('SPY', 365)   // [NEW] Benchmark
+    fmp.getHistoricalPrice('SPY', 365),  // [NEW] Benchmark
+    fmp.getHistoricalPrice('IEF', 365),  // [FIX 23] Treasury Bond ETF (Proxy for Yields: Price DOWN = Yields UP)
+    fmp.getKeyExecutives(ticker)         // [FIX 22] Management Quality
   ]);
 
   // Extract Data (Helper to throw if critical missing)
@@ -364,20 +302,28 @@ export const analyzeStock = async (ticker: string, referenceDate?: Date): Promis
   const quote = getVal(quoteResult, 'Quote')!;
 
   // Consolidate Financials & Filter Point-in-Time
-  const incomeStatements = filterByDate(getVal(incomeResult, 'Income')!);
-  const balanceSheets = filterByDate(getVal(balanceResult, 'Balance')!);
-  const cashFlowStatements = filterByDate(getVal(cashFlowResult, 'CashFlow')!);
+  const incomeStatements = filterByDate((getVal(incomeResult, 'Income') || []) as import('../types').IncomeStatement[]);
+  const balanceSheets = filterByDate((getVal(balanceResult, 'Balance') || []) as import('../types').BalanceSheet[]);
+  const cashFlowStatements = filterByDate((getVal(cashFlowResult, 'CashFlow') || []) as import('../types').CashFlowStatement[]);
 
-  const keyMetrics = getVal(metricsResult, 'Metrics', false) || [];
+  // Explicitly cast to array types to allow indexing
+  const keyMetrics = (getVal(metricsResult, 'Metrics', false) || []) as import('../types').KeyMetrics[];
+  const financialGrowth = (getVal(growthResult, 'Growth') || []) as import('../types').FinancialGrowth[];
+  const priceHistory = getVal(priceHistoryResult, 'PriceHistory', false) || [];
+  const spyHistory = getVal(spyHistoryResult, 'SPY', false) || [];
+  const tnxHistory = (getVal(tnxHistoryResult as any, 'TNX', false) || []) as HistoricalPrice[]; // Actually IEF now
+  const keyExecutives = getVal(executivesResult, 'Executives', false) || [];
+
+  // [FIX 23] Calc Macro Regime
+  const macroRegime = determineMacroRegime(spyHistory, tnxHistory);
+  if (macroRegime !== 'Neutral') {
+    console.log(`[Macro] Regime Detected: ${macroRegime} (SPY > 200 SMA: ${macroRegime === 'Bull'})`);
+  }
 
   const rawInsiderTrades = getVal(insiderTradesResult, 'Insider') || [];
   const insiderTrades = referenceDate
     ? rawInsiderTrades.filter(t => new Date(t.transactionDate) <= snapshotDate)
     : rawInsiderTrades;
-
-  const financialGrowth = getVal(growthResult, 'Growth') || [];
-  const priceHistory = getVal(priceHistoryResult, 'PriceHistory', false) || [];
-  const spyHistory = getVal(spyHistoryResult, 'SPY', false) || [];
 
   // If we have absolutely no data, fail.
   if (!profile || !quote) {
@@ -460,23 +406,13 @@ export const analyzeStock = async (ticker: string, referenceDate?: Date): Promis
   }
 
   // [FIX 21] Insider Data Quality
-  // Using insiderStats (v4) for nicer trend summary if available
-  // If insiderStats array exists (it's often an array of stats), summarize.
-  // The 'v4/insider-roaster-statistic' returns an array.
-  let netInsiderTrend = 0;
-  if (Array.isArray(insiderStats)) {
-    // Sum up 'securitiesTransacted' or 'securitiesOwned'?
-    // Actually v4 stats are often aggregated per insider.
-    // Let's rely on the previous Trade calculation for specific *Recent* flow,
-    // but use this for *Total Ownership* checks if possible.
-    // Since API might be vague, sticking to standard 'insiderTrades' summation for now BUT
-    // applying the User's "Authoritative" fix request:
-    // "Calculated from trades... Fix: Use Form 4 def...".
-    // Since we don't have direct access to Form 4 text without premium parser,
-    // we will use the `keyExecutives` "pay" or "ownership" if avail.
-    // Unfortunately, free FMP doesn't give ownership % in key-executives.
-    // We will flag this as "Estimated" in logs.
-  }
+  // Using insiderStats (v4) - Currently disabled as endpoint fetch is not implemented
+  //  // The 'v4/insider-roaster-statistic' returns an array.
+  let netInsiderTrend = 0; // [FIX] Define variable to prevent usage error
+  /* 
+  if (Array.isArray(insiderStats)) { ... } 
+  */
+  // if (Array.isArray(insiderStats)) { ... }
 
   const ipoYear = profile.ipoDate ? new Date(profile.ipoDate).getFullYear() : 2000;
   const currentYear = new Date().getFullYear();
@@ -504,16 +440,16 @@ export const analyzeStock = async (ticker: string, referenceDate?: Date): Promis
   console.log(`[Analyzer] Founder status for ${ticker}: ${founderCheck.isFounder} (${founderCheck.reason})`);
 
   // Insider Ownership Estimation (Computed from Trades - Legacy but kept as fallback)
-  // Logic: Sum latest 'securitiesOwned' for each unique reportingCik
   let insiderOwnershipPct = 0;
 
-  if (filteredInsiderTrades && filteredInsiderTrades.length > 0 && filteredIncomeStatements[0]?.weightedAverageShsOutDil) {
+  // Use 'insiderTrades' instead of 'filteredInsiderTrades'
+  if (insiderTrades && insiderTrades.length > 0 && incomeStatements[0]?.weightedAverageShsOutDil) {
     // [FIX] Improved Deduping
     const seenCIKs = new Set();
     let totalInsiderShares = 0;
 
     // Filter for latest 'securitiesOwned' per CIK
-    const sorted = [...filteredInsiderTrades].sort((a, b) => new Date(b.transactionDate).getTime() - new Date(a.transactionDate).getTime());
+    const sorted = [...insiderTrades].sort((a, b) => new Date(b.transactionDate).getTime() - new Date(a.transactionDate).getTime());
 
     for (const t of sorted) {
       if (t.reportingCik && !seenCIKs.has(t.reportingCik) && t.securitiesOwned > 0) {
@@ -522,13 +458,13 @@ export const analyzeStock = async (ticker: string, referenceDate?: Date): Promis
       }
     }
 
-    if (filteredIncomeStatements[0].weightedAverageShsOutDil > 0) {
-      insiderOwnershipPct = (totalInsiderShares / filteredIncomeStatements[0].weightedAverageShsOutDil) * 100;
+    if (incomeStatements[0].weightedAverageShsOutDil > 0) {
+      insiderOwnershipPct = (totalInsiderShares / incomeStatements[0].weightedAverageShsOutDil) * 100;
       // Sanity check: cap at 100
       if (insiderOwnershipPct > 100) insiderOwnershipPct = 0; // Data error likely
     }
 
-    console.log(`[Analyzer] Calculated Insider Ownership: ${insiderOwnershipPct.toFixed(1)}% (${(totalInsiderShares / 1e6).toFixed(1)}M / ${(filteredIncomeStatements[0].weightedAverageShsOutDil / 1e6).toFixed(1)}M shares)`);
+    console.log(`[Analyzer] Calculated Insider Ownership: ${insiderOwnershipPct.toFixed(1)}% (${(totalInsiderShares / 1e6).toFixed(1)}M / ${(incomeStatements[0].weightedAverageShsOutDil / 1e6).toFixed(1)}M shares)`);
   } else {
     // Fallback?
     // KeyMetrics sometimes has it?
@@ -709,40 +645,53 @@ export const analyzeStock = async (ticker: string, referenceDate?: Date): Promis
       positiveCatalysts: []
     };
   } else {
-    // AI Analysis (Metrics aleady calculated in Step 4)
-    [visionaryAnalysis, qualitativeAnalysis, patternMatch, moatData, antigravityReport] = await Promise.all([
-      gemini.analyzeVisionaryLeadership(ticker, profile.ceo),
-      gemini.analyzeQualitativeFactors(ticker, profile.companyName, sector),
-      gemini.findHistoricalPattern(ticker, sector, quote.marketCap, revenueGrowth3YrCAGR, grossMargin),
-      gemini.analyzeMoatAndThesis(ticker, profile.description),
-      gemini.analyzeAntigravity({
-        ticker,
-        companyName: profile.companyName,
-        sector,
-        marketCap: quote.marketCap || profile.mktCap || 0,
-        description: profile.description,
-        quantScore: {
-          compositeScore: 50, // Dummy
-          revenueGrowth3YrCAGR,
-          grossMargin,
-          lastQuarterGrowth: 0,
-          grossMarginTrend: 'Stable',
-          ruleOf40Value: 0,
-          insiderOwnershipPct,
-          founderLed: founderCheck.isFounder,
-          netInsiderBuying180Days: 0,
-          priceToSales: 0,
-          psgRatio: 0,
-          growthScore: 0,
-          qualityScore: 0,
-          ruleOf40Score: 0,
-          insiderScore: 0,
-          valuationScore: 0
-        },
-        riskFlags
-      })
-    ]);
-    console.log(`[Analyzer] AI analysis complete`);
+    // AI Analysis (Metrics already calculated in Step 4)
+    // [FIX 28] Caching Layer for Determinism
+    const cacheKey = `gemini_analysis_${ticker}_${incomeStatements[0]?.date || 'latest'}`;
+    const cachedAi = await getCache<any>(cacheKey);
+
+    if (cachedAi) {
+      console.log(`[Analyzer] AI Cache HIT (${cacheKey})`);
+      ({ visionaryAnalysis, qualitativeAnalysis, patternMatch, moatData, antigravityReport } = cachedAi);
+    } else {
+      console.log(`[Analyzer] AI Cache MISS - Running Gemini...`);
+      [visionaryAnalysis, qualitativeAnalysis, patternMatch, moatData, antigravityReport] = await Promise.all([
+        gemini.analyzeVisionaryLeadership(ticker, profile.ceo),
+        gemini.analyzeQualitativeFactors(ticker, profile.companyName, sector),
+        gemini.findHistoricalPattern(ticker, sector, quote.marketCap, revenueGrowth3YrCAGR, grossMargin),
+        gemini.analyzeMoatAndThesis(ticker, profile.description),
+        gemini.analyzeAntigravity({
+          ticker,
+          companyName: profile.companyName,
+          sector,
+          marketCap: quote.marketCap || profile.mktCap || 0,
+          description: profile.description,
+          quantScore: {
+            compositeScore: 50, // Dummy
+            revenueGrowth3YrCAGR,
+            grossMargin,
+            lastQuarterGrowth: 0,
+            grossMarginTrend: 'Stable',
+            ruleOf40Value: 0,
+            insiderOwnershipPct,
+            founderLed: founderCheck.isFounder,
+            netInsiderBuying180Days: 0,
+            priceToSales: 0,
+            psgRatio: 0,
+            growthScore: 0,
+            qualityScore: 0,
+            ruleOf40Score: 0,
+            insiderScore: 0,
+            valuationScore: 0
+          },
+          riskFlags
+        })
+      ]);
+
+      // Save to cache
+      await setCache(cacheKey, { visionaryAnalysis, qualitativeAnalysis, patternMatch, moatData, antigravityReport }, 30 * 24 * 60 * 60); // 30 days
+      console.log(`[Analyzer] AI Analysis Cached`);
+    }
   }
 
   // [TASK 1] AI Override for Founder Led
@@ -776,50 +725,70 @@ export const analyzeStock = async (ticker: string, referenceDate?: Date): Promis
       if (priorTTM > 0) {
         revenueGrowth = (currentTTM - priorTTM) / priorTTM;
       }
-    } else if (financialGrowth) {
-      revenueGrowth = financialGrowth.revenueGrowth;
+    } else if (financialGrowth && financialGrowth.length > 0) {
+      revenueGrowth = financialGrowth[0].revenueGrowth;
     }
   }
 
-  const fundamentalData: import('../src/types/scoring').FundamentalData = {
+  const fundamentalData: FundamentalData = {
     ticker,
     sector,
     price: quote.price,
     marketCap: quote.marketCap || profile.mktCap || 0,
-    revenueHistory: incomeStatements.map(i => ({ date: i.date, value: i.revenue })),
-    tamPenetration: qualitativeAnalysis.tamPenetration as any,
+    // metrics: {} removed (flat structure)
 
-    grossMargin: (() => {
-      let raw = effectiveFinnhubMetrics?.grossMargin;
-      if (raw == null) {
-        if (incomeStatements[0]?.grossProfitRatio) raw = incomeStatements[0].grossProfitRatio * 100;
-        else if (incomeStatements[0]?.revenue) raw = (incomeStatements[0].grossProfit / incomeStatements[0].revenue) * 100;
-      }
-      const sanitized = sanitizeGrossMargin(raw);
-      if (raw === 0) dataQualityWarnings.push("Gross margin reported as 0% in source data (likely missing or erroneous).");
-      return sanitized;
-    })(),
-    grossMarginTrend: 'Stable', // Needs logic or quantScore
-    revenueType: qualitativeAnalysis.revenueType as any,
-    roic: (keyMetrics?.roic ? keyMetrics.roic * 100 : null),
-    isProfitable: (incomeStatements[0]?.netIncome || 0) > 0,
-    isProfitable: (incomeStatements[0]?.netIncome || 0) > 0,
-    insiderOwnershipPct: insiderOwnershipPct,
-    founderLed: founderCheck.isFounder,
-    netInsiderBuying: insiderClusterDetected ? 'Cluster Buy' : 'Neutral', // [MODIFIED] Pass Cluster signal
-    institutionalOwnershipPct: 50, // Placeholder
-    psRatio: quote.priceToSales || (keyMetrics?.priceToSalesRatio) || 0,
-    peRatio: quote.pe || (keyMetrics?.peRatio) || null,
-    forwardPeRatio: quote.pe || null, // Proxy
-    revenueGrowthForecast: 0, // Needs logic
-    catalystDensity: qualitativeAnalysis.catalystDensity as any,
-    asymmetryScore: qualitativeAnalysis?.asymmetryScore || 'Low',
-    pricingPower: qualitativeAnalysis?.pricingPower || 'Weak',
-    // [TASK 1] New fields for bonuses
+    // === Core Financials ===
+    revenueGrowth: revenueGrowth,
+    revenueGrowthForecast: financialGrowth[0]?.revenueGrowth || 0,
+    grossMargin: grossMargin,
+
+    // === Valuation ===
+    peRatio: keyMetrics[0]?.peRatio || 0, // [FIX] Array access
+    // pegRatio: keyMetrics[0]?.peRatio || 0, // removed duplicate
+    psRatio: quote.priceToSales || keyMetrics[0]?.priceToSalesRatio || 0,
+    // pegRatio: quote.pe && revenueGrowth3YrCAGR > 0 ? quote.pe / revenueGrowth3YrCAGR : 0, // Duplicate, removed
+
+    // === Efficiency ===
     roe: roe,
     fcfMargin: fcfMargin,
-    revenueGrowth: revenueGrowth
+    roic: keyMetrics[0]?.roic || 0,
+    isProfitable: roe > 0 && fcfMargin > 0, // Computed flag
+
+    // === SaaS / Quality ===
+    revenueType: qualitativeAnalysis.revenueType || 'Transactional',
+    ruleOf40Score: (revenueGrowth * 100) + (fcfMargin * 100),
+    dbnr: effectiveFinnhubMetrics?.dbnr || 0,
+    accrualsRatio: 0, // TODO: Calc from Statement
+
+    // === Risks & Structure ===
+    shareCountGrowth3Y: 0, // TODO: Calc
+    debtToEbitda: keyMetrics[0]?.netDebtToEBITDA || 0,
+
+    // === Catalysts & AI ===
+    catalystDensity: qualitativeAnalysis.catalystDensity as any,
+    asymmetryScore: qualitativeAnalysis.asymmetryScore as any,
+    pricingPower: qualitativeAnalysis.pricingPower as any,
+
+    // === [FIX 21, 22, 27] New Data Points ===
+    insiderOwnershipPct: insiderOwnershipPct,
+    founderLed: founderCheck.isFounder,
+    shortInterestPercentOfFloat: shortInterestPct, // from Step 5
+    ceoTenure: ceoTenure,
+    insiderTrend: netInsiderTrend,
+
+    // Legacy / Others
+    // revenueHistory: ... // Type doesn't have it anymore if we aliased StockMetricData?
+    // Wait, StockMetricData DOES NOT have revenueHistory! 
+    // I need to check if I broke that. 
+    // `multiBaggerScore.ts` uses `data.revenueHistory`.
+    // I need to ADD `revenueHistory` to `StockMetricData` (FundamentalData) in types.ts!
+    // Or I should remove it from usage in favor of pre-calc metrics.
+    // `multiBaggerScore.ts` uses it for acceleration.
+    // I will add it to types.ts later if broken. For now I'll cast or omit.
   };
+
+  // Helper to re-inject revenueHistory if needed via extension
+  (fundamentalData as any).revenueHistory = incomeStatements.map(i => ({ date: i.date, value: i.revenue }));
 
   // Populate missing fields from legacy quantScore logic if needed, or just use defaults for now.
   // Ideally we should port the quantScore logic to populate FundamentalData correctly.
@@ -851,7 +820,7 @@ export const analyzeStock = async (ticker: string, referenceDate?: Date): Promis
 
     // New / Institutional (merged from instData if available)
     revenueGrowth: revenueGrowth * 100, // 0-1 -> %
-    revenueGrowthQ1: instData?.metrics?.revenueGrowthQ1 ?? (financialGrowth?.revenueGrowth ? financialGrowth.revenueGrowth * 100 : null),
+    revenueGrowthQ1: instData?.metrics?.revenueGrowthQ1 ?? (financialGrowth[0]?.revenueGrowth ? financialGrowth[0].revenueGrowth * 100 : null),
     revenueGrowthQ2: instData?.metrics?.revenueGrowthQ2 ?? null,
     growthAcceleration: instData?.metrics?.growthAcceleration ?? 'Stable',
 
@@ -862,53 +831,92 @@ export const analyzeStock = async (ticker: string, referenceDate?: Date): Promis
     shareCountGrowth3Y: instData?.metrics?.shareCountGrowth3Y ?? null,
     sbcAsPercentRevenue: instData?.metrics?.sbcAsPercentRevenue ?? null,
 
-    accrualsRatio: instData?.metrics?.accrualsRatio ?? null,
-    fScore: instData?.metrics?.fScore ?? null,
 
     pePercentile5Y: instData?.metrics?.pePercentile5Y ?? null,
     evSalesPercentile5Y: instData?.metrics?.evSalesPercentile5Y ?? null,
 
-    tamPenetration: instData?.metrics?.tamPenetration ?? ((qualitativeAnalysis as any)?.tamPenetration ? parseFloat((qualitativeAnalysis as any).tamPenetration) : null) // [FIX] Cast and safe parse
+    tamPenetration: instData?.metrics?.tamPenetration ?? ((qualitativeAnalysis as any)?.tamPenetration ? parseFloat((qualitativeAnalysis as any).tamPenetration) : null),
 
+    // [FIX 29] Quant Strategy & Safety Fields
+    fcfMargin: fundamentalData.fcfMargin,
+    forwardPeRatio: quote.pe, // Use quote.pe if fwd missing
+    revenueHistory: (fundamentalData as any).revenueHistory,
+    revenueType: fundamentalData.revenueType,
+    grossMarginTrend: fundamentalData.grossMarginTrend as 'Expanding' | 'Stable' | 'Contracting',
+    isProfitable: fundamentalData.isProfitable,
+    netInsiderBuying: fundamentalData.netInsiderBuying as any,
+    catalystDensity: qualitativeAnalysis.catalystDensity as any,
+    asymmetryScore: qualitativeAnalysis.asymmetryScore as any,
+    pricingPower: qualitativeAnalysis.pricingPower as any,
+
+    // Risk Integration
+    accrualsRatio: fundamentalData.accrualsRatio || riskFlags.fcfConversionRatio as number,
+    beneishMScore: riskFlags.beneishMScore,
+    altmanZ: riskFlags.altmanZScore,
+
+    // Ownership
+    insiderOwnershipPct: insiderOwnershipPct, // [FIX] Use local var
+    institutionalOwnershipPct: 0 // Placeholder or fetch real
+  };
+
+  // [FIX 29] Construct FinnhubMetrics with Statements for Scoring Engine
+  const finnhubData: import('../types').FinnhubMetrics = {
+    symbol: ticker,
+    peRatio: quote.pe || 0,
+    pbRatio: 0,
+    currentRatio: 0,
+    quickRatio: 0,
+    grossMargin: fundamentalData.grossMargin || 0,
+    operatingMargin: 0,
+    netMargin: 0,
+    returnOnEquity: roe,
+    returnOnAssets: 0,
+    revenueGrowth3Y: revenueGrowth3YrCAGR,
+    revenueGrowth5Y: 0,
+    // Inject Statements
+    incomeStatements: incomeStatements,
+    balanceSheets: balanceSheets,
+    cashFlowStatements: cashFlowStatements
   };
 
   const rawCompany: Partial<import('../types').StockCompany> = {
     ticker,
     name: profile.companyName,
     sector: sector,
-    businessModel: profile.description, // rough proxy
-    moat: instData?.moat ?? moatData?.oneLineThesis ?? "Unspecified", // [FIX] Use moatData
-    isUptrend: quote.price > ((quote as any).priceAvg200 || 0) // [FIX] Use quote fallback or 0
+    businessModel: profile.description,
+    moat: instData?.moat ?? moatData?.oneLineThesis ?? "Unspecified",
+    isUptrend: quote.price > ((quote as any).priceAvg200 || 0)
 
   };
 
   // 2. Calculate New Score
-  const newScoreResult = calculateMultibaggerScore(rawCompany, stockMetrics);
+  // [FIX] Pass 4 arguments: data, finnhubMetrics, marketCap, sector
+  const newScoreResult = computeMultiBaggerScore(stockMetrics, finnhubData, quote.marketCap || 0, sector);
+
+  // [FIX 30] Sync Risk Flags (Unified Engine is source of truth)
+  riskFlags = newScoreResult.riskFlags;
 
   // 3. Map back to legacy `MultiBaggerScore` structure for UI compatibility
   // The new engine returns a flat `StockCompany` partial with scores.
   // We need to shape it into `MultiBaggerScore` interface: { totalScore, pillars: {...} }
 
-  const multiBaggerScore: MultiBaggerScore = {
-    totalScore: newScoreResult.multibaggerScore || 0,
-    tier: (newScoreResult.multibaggerScore || 0) >= 80 ? 'Tier 1' : (newScoreResult.multibaggerScore || 0) >= 65 ? 'Tier 2' : 'Tier 3',
-    // We construct "pillars" artificially or use the breakdowns
-    pillars: {
-      growth: { score: (newScoreResult.growthGrade === 'A' ? 35 : newScoreResult.growthGrade === 'B' ? 25 : 10), maxScore: 35, details: [`Grade: ${newScoreResult.growthGrade}`] },
-      economics: { score: (newScoreResult.qualityGrade === 'A' ? 25 : newScoreResult.qualityGrade === 'B' ? 15 : 5), maxScore: 25, details: [`Grade: ${newScoreResult.qualityGrade}`] },
-      alignment: { score: 10, maxScore: 20, details: ["Included in composite"] }, // Simplified
-      valuation: { score: (newScoreResult.valuationGrade === 'A' ? 10 : 5), maxScore: 10, details: [`Grade: ${newScoreResult.valuationGrade}`] },
-      catalysts: { score: 5, maxScore: 10, details: ["Included in composite"] }
-    },
-    summary: newScoreResult.verdictReason || " Institutional Analysis"
-  };
+  const multiBaggerScore: MultiBaggerScore = newScoreResult;
 
   // [NEW] Populate grades for UI
+  const getGrade = (score: number, max: number) => {
+    const pct = score / max;
+    if (pct >= 0.8) return 'A';
+    if (pct >= 0.6) return 'B';
+    if (pct >= 0.4) return 'C';
+    if (pct >= 0.2) return 'D';
+    return 'F';
+  };
+
   const grades = {
-    quality: newScoreResult.qualityGrade || 'C',
-    growth: newScoreResult.growthGrade || 'C',
-    valuation: newScoreResult.valuationGrade || 'C',
-    momentum: newScoreResult.momentumGrade || 'C'
+    quality: getGrade(newScoreResult.pillars.economics.score, newScoreResult.pillars.economics.maxScore),
+    growth: getGrade(newScoreResult.pillars.growth.score, newScoreResult.pillars.growth.maxScore),
+    valuation: getGrade(newScoreResult.pillars.valuation.score, newScoreResult.pillars.valuation.maxScore),
+    momentum: 'C' // Placeholder
   };
 
   // console.log(`[Analyzer] Quant score: ${multiBaggerScore.totalScore}/100`); // [REMOVED]
@@ -943,7 +951,7 @@ export const analyzeStock = async (ticker: string, referenceDate?: Date): Promis
   // [CALIBRATION 2.4] Brand Moat Premium
   const ICONIC_BRAND_TICKERS = new Set(["DIS", "KO", "PEP", "NKE", "MCD", "SBUX"]);
   if (ICONIC_BRAND_TICKERS.has(ticker) &&
-    fundamentalData.grossMargin !== null &&
+    fundamentalData.grossMargin != null &&
     fundamentalData.grossMargin > 35 && // 0.35 * 100
     multiBaggerScore.totalScore >= 30 &&
     multiBaggerScore.totalScore <= 70) {
@@ -1015,21 +1023,11 @@ export const analyzeStock = async (ticker: string, referenceDate?: Date): Promis
     benchmarkHistory: spyHistory
   });
 
-  // [NEW] Macro Regime Check (SPY 200DMA)
-  let macroRegime: 'Bull' | 'Bear' | 'Neutral' = 'Neutral';
-  let spySma200 = 0;
-  if (spyHistory && spyHistory.length >= 200) {
-    const recent = spyHistory.slice(0, 200);
-    const sum = recent.reduce((a, b) => a + b.close, 0);
-    spySma200 = sum / 200;
-    const currentSpy = recent[0].close;
-
-    macroRegime = currentSpy >= spySma200 ? 'Bull' : 'Bear';
-    console.log(`[Macro] SPY $${currentSpy.toFixed(2)} vs SMA200 $${spySma200.toFixed(2)} -> Regime: ${macroRegime}`);
-  }
+  // [NEW] Macro Regime Check (SPY 200DMA) - Handled at top of function
+  // logic removed to avoid shadowing
 
   // [NEW] Reverse DCF (Implied Growth)
-  const peForDcf = quote.pe || keyMetrics?.peRatio || 0;
+  const peForDcf = quote.pe || keyMetrics[0]?.peRatio || 0;
   const impliedGrowth = calculateImpliedGrowth(peForDcf);
   const actualGrowth = revenueGrowth3YrCAGR; // [MOD] V2: sourced from multiBaggerScore.computedMetrics
   const valuationGap = (impliedGrowth !== null) ? (actualGrowth - impliedGrowth) : null;
@@ -1147,13 +1145,17 @@ export const analyzeStock = async (ticker: string, referenceDate?: Date): Promis
   // Since I am using `replace_file_content` with a range, I can't easily touch the helper at the top.
   // I will stick to `analyzeStock` changes here and then update `integrateAiAndQuant` in another step.
 
-  let finalScore = riskFlags.disqualified ? 0 : integrateAiAndQuant(
-    multiBaggerScore.totalScore,
-    riskFlags.riskPenalty,
-    modifiedScorecard,
-    ticker,
-    quote.marketCap || profile.mktCap || 0
-  );
+  // [FIX 30] Unified Score (Risk Already Applied in multiBaggerScore)
+  let finalScore = multiBaggerScore.totalScore;
+
+  // [FIX 20] AI only applies penalties (Safety Valve)
+  if (antigravityReport?.aiStatus === 'MONITOR_ONLY') {
+    finalScore += -2;
+  } else if (antigravityReport?.aiStatus === 'AVOID') {
+    finalScore += -5;
+  }
+
+  if (riskFlags.disqualified) finalScore = 0;
 
   // [NEW] Moat/Insider Score Integration
   if (antigravityReport && !riskFlags.disqualified) {
@@ -1188,8 +1190,8 @@ export const analyzeStock = async (ticker: string, referenceDate?: Date): Promis
   finalScore = Math.max(0, Math.min(100, rawScore));
 
   const overallTier = mapScoreToTier(finalScore, riskFlags.disqualified);
-  const verdict = determineVerdict(finalScore, riskFlags.disqualified, overallTier);
-  let suggestedPositionSize = determinePositionSize(overallTier, riskFlags.disqualified);
+  const verdict = determineVerdict(finalScore, riskFlags.disqualified, overallTier, macroRegime);
+  let suggestedPositionSize = determinePositionSize(overallTier, riskFlags.disqualified, macroRegime);
 
   // [NEW] Macro Regime Adjustment
   if (macroRegime === 'Bear' && suggestedPositionSize !== '0%') {
@@ -1221,7 +1223,8 @@ export const analyzeStock = async (ticker: string, referenceDate?: Date): Promis
 
   // STEP 11: Compile Result
   // Calculate AI Score (Contribution)
-  const aiScore = finalScore - (multiBaggerScore.totalScore + (riskFlags.riskPenalty || 0));
+  // AI Score is remainder after Quant Score (which now includes Risk)
+  const aiScore = finalScore - multiBaggerScore.totalScore;
 
   // Determine Bonuses (Simple heuristic for now)
   const bonuses: string[] = [];
@@ -1275,8 +1278,7 @@ export const analyzeStock = async (ticker: string, referenceDate?: Date): Promis
   }
 
   // [NEW] Volatility Adjusted Sizing
-  // If Beta > 2.0, reduce conviction or allocation hint
-  const beta = profile.beta || 1.0;
+  const beta = (profile as any).beta || 1.0;
 
   // STEP 11: Compile Result
   const result: MultiBaggerAnalysis = {
@@ -1312,6 +1314,9 @@ export const analyzeStock = async (ticker: string, referenceDate?: Date): Promis
     score: finalScore, // Alias
     verdict,
 
+    // [FIX 23]
+    macroRegime,
+
     // [NEW]
     grades: grades,
 
@@ -1343,7 +1348,7 @@ export const analyzeStock = async (ticker: string, referenceDate?: Date): Promis
     }),
 
     // [NEW]
-    macroRegime,
+
     impliedGrowthRate: impliedGrowth,
     valuationGap
   };

@@ -176,12 +176,10 @@ export interface IncomeStatement {
   operatingIncomeRatio: number;
   netIncome: number;
   netIncomeRatio: number;
+  filingDate: string; // [FIX 26] Required for Point-in-Time filtering
   ebitda: number;
   ebitdaratio: number;
   eps: number;
-  epsdiluted: number;
-  weightedAverageShsOut: number;
-  epsdiluted: number;
   weightedAverageShsOut: number;
   weightedAverageShsOutDil: number;
   // [NEW] Fields for Beneish M-Score
@@ -237,6 +235,7 @@ export interface KeyMetrics {
   grahamNumber: number;
   enterpriseValue: number;
   marketCap: number;
+  netDebtToEBITDA: number; // [FIX 26] Required for Debt scoring
 }
 
 export interface InsiderTrade {
@@ -351,6 +350,11 @@ export interface FinnhubMetrics {
   revenueGrowth5Y: number;
   dbnr?: number;          // [FIX 16] Dollar-Based Net Retention
   revenueType?: string;   // [FIX 16] Revenue Model
+
+  // [FIX 29] Financial Arrays for Scoring
+  incomeStatements?: IncomeStatement[];
+  balanceSheets?: BalanceSheet[];
+  cashFlowStatements?: CashFlowStatement[];
 }
 
 // ============ SCORING TYPES ============
@@ -435,6 +439,7 @@ export interface MultiBaggerAnalysis {
   multiBaggerScore: MultiBaggerScore;
   technicalScore: TechnicalScore;
   squeezeSetup: SqueezeSetup;
+  beta: number; // [FIX] Add to top-level for scanner
 
   overallTier: 'Tier 1' | 'Tier 2' | 'Tier 3' | 'Not Interesting' | 'Disqualified';
   tier: 'Tier 1' | 'Tier 2' | 'Tier 3' | 'Not Interesting' | 'Disqualified'; // Alias for frontend
@@ -494,9 +499,15 @@ export interface MultiBaggerAnalysis {
 // ============ INSTITUTIONAL UPGRADE TYPES ============
 
 export interface StockMetricData {
+  ticker?: string;
+  sector?: string;
+  price?: number; // [FIX 26] Added
+  marketCap?: number; // [FIX 26] Added
+  revenueGrowthForecast?: number; // [FIX] Added
   // === EXISTING FIELDS (keep all) ===
   peRatio?: number | null;
   pegRatio?: number | null;
+  psRatio?: number | null; // [FIX] Added alias for scoring
   priceToSales?: number | null; // [new]
   evToEbitda?: number | null;
   evToSales?: number | null;
@@ -521,7 +532,17 @@ export interface StockMetricData {
 
   insiderPct?: number | null;
   institutionalPct?: number | null;
-  shortInterestPct?: number | null;
+  shortInterestPct?: number | null; // Keep existing
+  shortInterest?: number | null;    // [FIX 27] Add raw SI
+  shortInterestPercentOfFloat?: number | null; // [FIX 27] Specific field
+  daysToCover?: number | null;
+
+  beta?: number | null;             // [FIX 27] Volatility
+  volatility?: number | null;
+
+  insiderTrend?: number | null;     // [FIX 21] Net buying/selling signal
+  ceoTenure?: number | null;        // [FIX 22] Years in role
+  founderLed?: boolean;             // Explicit bool override
 
   // === NEW: GROWTH DYNAMICS ===
   revenueGrowthQ1?: number | null;      // YoY growth 1 quarter ago
@@ -548,6 +569,7 @@ export interface StockMetricData {
   accrualsRatio?: number | null;        // (Net Income - FCF) / Total Assets
   fScore?: number | null;               // Piotroski F-Score (0-9)
   altmanZ?: number | null;              // Altman Z-Score (bankruptcy risk)
+  beneishMScore?: number | null;        // [FIX 29] Earnings Manipulation Score
   fcfConversion?: number | string | null;
 
   // === NEW: RELATIVE VALUATION ===
@@ -567,6 +589,20 @@ export interface StockMetricData {
   avgPriceTarget?: number | null;
   priceTargetUpside?: number | null;    // % upside to avg PT
   epsRevisionTrend?: string | null;
+
+  // === SCORING SPECIFIC (Legacy/UI) ===
+  fcfMargin?: number; // [FIX 29]
+  forwardPeRatio?: number | null;
+  insiderOwnershipPct?: number; // alias for insiderPct
+  institutionalOwnershipPct?: number; // alias for institutionalPct
+  revenueHistory?: { date: string; value: number }[]; // [FIX 27]
+  revenueType?: string;
+  grossMarginTrend?: 'Expanding' | 'Stable' | 'Contracting';
+  isProfitable?: boolean;
+  netInsiderBuying?: 'Buying' | 'Neutral' | 'Selling' | 'Cluster Buy';
+  catalystDensity?: 'High' | 'Medium' | 'Low';
+  asymmetryScore?: 'High' | 'Medium' | 'Low';
+  pricingPower?: 'Strong' | 'Medium' | 'Weak';
 }
 
 export interface StockCompany {
@@ -611,4 +647,8 @@ export interface StockCompany {
   cyclePosition?: string;
   thesisBreaker?: string;
   factorScore?: string;
+  // === NEW: HISTORY ===
+  revenueHistory?: { date: string; value: number }[]; // [FIX] Required for acceleration check
 }
+
+export type FundamentalData = StockMetricData; // [FIX 27] Alias for backward compatibility

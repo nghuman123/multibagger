@@ -49,7 +49,7 @@ export interface PillarScore {
 
 export interface MultiBaggerScore {
     totalScore: number; // 0-100
-    tier: 'Tier 1' | 'Tier 2' | 'Tier 3' | 'Not Interesting';
+    tier: 'Tier 1' | 'Tier 2' | 'Tier 3' | 'Not Interesting' | 'Disqualified';
 
     pillars: {
         growth: PillarScore;       // A (35)
@@ -60,6 +60,16 @@ export interface MultiBaggerScore {
     };
 
     summary: string;
+
+    // [NEW] Detailed Feedback
+    breakdown: string[];
+    bonuses: string[];
+    penalties: string[];
+    computedMetrics: {
+        cagr3y: number;
+        grossMargin: number;
+        revenueGrowth: number;
+    };
 }
 
 export interface PriceHistoryData {

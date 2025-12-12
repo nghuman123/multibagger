@@ -14,7 +14,8 @@ import type {
   InsiderTrade,
   FinancialGrowth,
   StockQuote,
-  HistoricalPrice
+  HistoricalPrice,
+  KeyExecutive
 } from '../../types';
 import { fetchWithRetry, ApiError } from '../utils/retry';
 import { getCache, setCache } from '../utils/cache';
@@ -82,9 +83,18 @@ const fetchData = async <T>(endpoint: string): Promise<T> => {
       throw new ApiError('RATE_LIMIT', 'FMP API rate limit exceeded');
     }
 
-    if (res.status === 401 || res.status === 403) {
-      console.warn("FMP Invalid Key - Falling back to mock data");
-      // Do not throw, just return null to allow app to function with mock data
+    if (res.status === 402) {
+      console.warn(`[FMP] Payment Required (402) for ${endpoint}. Feature may not be in plan.`);
+      return null as T;
+    }
+
+    if (res.status === 403) {
+      console.warn(`[FMP] Access Restricted (403) for ${endpoint}. Feature likely not in plan.`);
+      return null as T;
+    }
+
+    if (res.status === 401) {
+      console.warn("FMP Invalid Key (401) - Check your API key.");
       return null as T;
     }
 
@@ -101,6 +111,11 @@ const fetchData = async <T>(endpoint: string): Promise<T> => {
 
     // FMP sometimes returns error messages in 200 OK responses
     if (data && data['Error Message']) {
+      // If "Limit Reach" or similar, maybe treat as rate limit or restricted?
+      if (data['Error Message'].includes('Limit') || data['Error Message'].includes('Premium')) {
+        console.warn(`[FMP] API Limit/Premium Restriction: ${data['Error Message']}`);
+        return null as T;
+      }
       throw new ApiError('UNKNOWN', data['Error Message']);
     }
 
@@ -214,8 +229,9 @@ export const getIncomeStatements = async (symbol: string, limit = 12): Promise<I
       ebitda: 250000000, ebitdaratio: 0.25,
       eps: 1.5, epsdiluted: 1.5,
       weightedAverageShsOut: 100000000, weightedAverageShsOutDil: 100000000,
-      fillingDate: `2024-0${5 - i}-15`, acceptedDate: `2024-0${5 - i}-15`,
-      period: 'Q' + (4 - i), link: '', finalLink: ''
+      filingDate: `2024-0${5 - i}-15`, acceptedDate: `2024-0${5 - i}-15`,
+      period: 'Q' + (4 - i), link: '', finalLink: '',
+      depreciationAndAmortization: 50000000, sellingGeneralAndAdministrativeExpenses: 100000000
     }));
   }
   try {
@@ -237,8 +253,9 @@ export const getBalanceSheets = async (symbol: string, limit = 12): Promise<Bala
       totalCurrentLiabilities: 500000000, totalLiabilities: 1000000000,
       totalStockholdersEquity: 1000000000, retainedEarnings: 500000000,
       totalDebt: 400000000, netDebt: -200000000,
-      fillingDate: `2024-0${5 - i}-15`, acceptedDate: `2024-0${5 - i}-15`,
-      period: 'Q' + (4 - i), link: '', finalLink: ''
+      filingDate: `2024-0${5 - i}-15`, acceptedDate: `2024-0${5 - i}-15`,
+      period: 'Q' + (4 - i), link: '', finalLink: '',
+      netReceivables: 200000000, propertyPlantEquipmentNet: 300000000
     }));
   }
   try {
@@ -304,7 +321,8 @@ export const getInsiderTrades = async (symbol: string): Promise<InsiderTrade[]> 
 // Bulk fetch for screener
 export const getKeyExecutives = async (symbol: string): Promise<KeyExecutive[]> => {
   try {
-    return await fetchData<KeyExecutive[]>(`/key-executives/${symbol}`);
+    // [FIX] Explicitly force v3 endpoint to bypass stable base which might lack this resource
+    return await fetchData<KeyExecutive[]>(`https://financialmodelingprep.com/api/v3/key-executives/${symbol}`);
   } catch (error) {
     console.error(`Error fetching key executives for ${symbol}:`, error);
     return [];

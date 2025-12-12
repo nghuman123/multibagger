@@ -32,7 +32,11 @@ const tier1Data: FundamentalData = {
     revenueGrowthForecast: 40,
     catalystDensity: 'High',
     asymmetryScore: 'High',
-    pricingPower: 'Strong'
+    pricingPower: 'Strong',
+    // [FIX] Added missing fields
+    roe: 0.25,
+    fcfMargin: 0.30,
+    revenueGrowth: 0.60
 };
 
 const tier3Data: FundamentalData = {
@@ -63,13 +67,17 @@ const tier3Data: FundamentalData = {
     revenueGrowthForecast: 10,
     catalystDensity: 'Low',
     asymmetryScore: 'Low',
-    pricingPower: 'Neutral'
+    pricingPower: 'Neutral',
+    // [FIX] Added missing fields
+    roe: 0.10,
+    fcfMargin: 0.05,
+    revenueGrowth: 0.05
 };
 
 console.log('--- Tier 1 Test ---');
-const score1 = computeMultiBaggerScore(tier1Data);
+const score1 = computeMultiBaggerScore(tier1Data, {} as any, tier1Data.marketCap, tier1Data.sector);
 console.log(score1.summary);
 
 console.log('\n--- Tier 3 Test ---');
-const score3 = computeMultiBaggerScore(tier3Data);
+const score3 = computeMultiBaggerScore(tier3Data, {} as any, tier3Data.marketCap, tier3Data.sector);
 console.log(score3.summary);
