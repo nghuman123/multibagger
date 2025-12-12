@@ -418,10 +418,16 @@ export const getFinancialEstimates = async (ticker: string) => {
       "revenueGrowth3Y": number,
       "grossMargin": number,
       "operatingMargin": number,
-      "returnOnEquity": number
+      "returnOnEquity": number,
+      "netRetention": number,
+      "revenueType": "Recurring" | "Usage" | "Transactional" | "Hardware" | "Project"
     }
   `;
-  const task = `Extract explicit financial metrics for ${ticker}. DO NOT ESTIMATE or GUESS. If data is not explicitly available in your knowledge base, return 0.`;
+  const task = `Extract explicit financial metrics for ${ticker} from search results / knowledge.
+  CRITICAL:
+  1. Find "Dollar Based Net Retention" (DBNR) or "Net Revenue Retention" (NRR/NDR). If typically not reported, use 0.
+  2. Classify "revenueType" based on the primary business model.
+  3. DO NOT ESTIMATE numbers. Use 0 if not found.`;
 
   try {
     const res = await safeGenerateContent({
@@ -436,10 +442,15 @@ export const getFinancialEstimates = async (ticker: string) => {
       revenueGrowth3Y: parsed?.revenueGrowth3Y ?? 0,
       grossMargin: parsed?.grossMargin ?? 0,
       operatingMargin: parsed?.operatingMargin ?? 0,
-      returnOnEquity: parsed?.returnOnEquity ?? 0
+      returnOnEquity: parsed?.returnOnEquity ?? 0,
+      netRetention: parsed?.netRetention ?? 0,
+      revenueType: parsed?.revenueType || 'Transactional'
     };
   } catch (e) {
-    return { revenueGrowth3Y: 0, grossMargin: 0, operatingMargin: 0, returnOnEquity: 0 };
+    return {
+      revenueGrowth3Y: 0, grossMargin: 0, operatingMargin: 0, returnOnEquity: 0,
+      netRetention: 0, revenueType: 'Transactional'
+    };
   }
 };
 

@@ -349,6 +349,8 @@ export interface FinnhubMetrics {
   returnOnAssets: number;
   revenueGrowth3Y: number;
   revenueGrowth5Y: number;
+  dbnr?: number;          // [FIX 16] Dollar-Based Net Retention
+  revenueType?: string;   // [FIX 16] Revenue Model
 }
 
 // ============ SCORING TYPES ============

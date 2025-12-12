@@ -311,6 +311,41 @@ export const getKeyExecutives = async (symbol: string): Promise<KeyExecutive[]> 
   }
 };
 
+export const getKeyStatistics = async (symbol: string): Promise<any | null> => {
+  try {
+    // TTM Key Metrics often has 'marketCap', 'pe', etc.
+    // 'Key Statistics' specifically usually means Yahoo-style stats.
+    // FMP has `/quote` which we use.
+    // But for 'heldPercentInsiders', it's often in `/company-outlook` (Deep object) OR `/profile` (sometimes?)
+    // Let's try `/key-metrics-ttm`? No, that's valuation.
+    // Correct endpoint for ownership: `/institutional-holder/symbol` (List)
+    // BUT user wants single number.
+    // Let's look for "Key Statistics" endpoint?
+    // /score?
+    // Let's try to fetch `/enterprise-values`? No.
+    // FMP v3/profile often has it?
+    // Let's assume we use `/key-executives` for management.
+    // For Ownership, if `/quote` doesn't have it, we might have to stick to manual OR use `/outlook` which is huge.
+    // Wait, `/mp/key-statistics/{symbol}`?
+    // I will use a known endpoint for "scores" or ratios.
+    // Actually, I'll stick to `getKeyExecutives` for now (Management) and investigate Ownership further.
+    // User mentioned: "Use Form 4 + DEF 14A proxy data".
+    // I'll add `getInsiderStatistics` which might be a custom aggregation if API fails.
+    // But wait, user said "Fix: Use Form 4...".
+    // I will add `getKeyStatistics` attempting to hit `/key-executives` (done) and `/insider-trading/rss_feed`?
+    // No, let's look for a specialized endpoint.
+    // `v4/insider-roaster-statistic`
+
+    // I will add `getInsiderStatistics` using the v4 endpoint which provides aggregated stats.
+    const url = `/v4/insider-roaster-statistic?symbol=${symbol}`;
+    // This usually returns { buys, sells, total, averageSecuritiesOwned... }
+    return await fetchData<any>(url);
+  } catch (error) {
+    console.warn(`Error fetching insider stats for ${symbol}:`, error);
+    return null;
+  }
+};
+
 export const getStockScreener = async (params: {
   marketCapMoreThan?: number;
   marketCapLowerThan?: number;

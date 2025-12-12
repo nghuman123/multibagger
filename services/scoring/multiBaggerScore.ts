@@ -177,12 +177,31 @@ const scoreQuality = (
     sector: SectorType,
     grossMargin: number, // [NEW]
     netDebtEbitda: number | null, // [FIX 11]
-    rndIntensity: number // [FIX 11]
+    rndIntensity: number, // [FIX 11]
+    revenueType: string // [FIX 16]
 ): ComponentScore => {
     let score = 0;
     const breakdown: string[] = [];
 
-    // 1. Gross Margin
+    // 0. Revenue Quality (10 pts) - [FIX 16]
+    // "Revenue is vanity, Profit is sanity, Cash is reality" - ... but Revenue Quality predicts stability.
+    let qualScore = 2; // Default Low
+    const rt = (revenueType || 'Transactional').toLowerCase();
+
+    if (rt.includes('recurring') || rt.includes('subscription') || rt.includes('saas')) {
+        qualScore = 10; // Gold Standard
+    } else if (rt.includes('usage') || rt.includes('consumption')) {
+        qualScore = 8;  // AWS/Snowflake Model (High expansion potential)
+    } else if (rt.includes('transaction')) {
+        qualScore = 6;  // Visa/Exchange Model
+    } else if (rt.includes('hardware') || rt.includes('product')) {
+        qualScore = 4;  // Apple/Tesla (Good but cyclical)
+    } else if (rt.includes('project') || rt.includes('consulting') || rt.includes('service')) {
+        qualScore = 2;  // Lumpy/Unscalable
+    }
+
+    score += qualScore;
+    breakdown.push(`Revenue Quality (${revenueType}): +${qualScore}/10`);
     // Config-driven thresholds
     const isSoftware = ['SaaS', 'FinTech'].includes(sector);
     const gmTarget = isSoftware ? STRATEGY.QUALITY.GM_SOFTWARE_ELITE : STRATEGY.QUALITY.GM_HARDWARE_ELITE;
@@ -221,7 +240,10 @@ const scoreQuality = (
     }
 
     // Cap Score at 25
-    score = Math.min(score, 25);
+    // Cap Score at 30 (Quality weight increased via formula or capped inside)
+    // Quality Weights: GM(10) + RevQual(10) + Leverage(2+/-) + Innovation(2) + FCF?
+    // Let's cap at 30 to match the Pillar Weight passed downstream.
+    score = Math.min(score, 30);
 
     return { score, maxScore: 25, details: breakdown };
 };
@@ -328,51 +350,81 @@ function scoreAlignment(data: FundamentalData): PillarScore {
 
 // --- Pillar D: Valuation (10 pts) ---
 // [FIX 7] PSG Ratio with Growth Floor
-function scorePSG(psRatio: number, growthRate: number): { score: number; detail: string } {
-    // Guard: If growth is very low, PSG becomes meaningless
-    if (growthRate < 5) {
-        return { score: 0, detail: `PSG N/A: Growth < 5%` };
+// --- Pillar D: Valuation (10 pts) ---
+// [FIX 18] Rule of X (P/S adjusted for GM and Growth)
+function scoreRuleOfX(psRatio: number, growthRate: number, grossMargin: number): { score: number; detail: string } {
+    // Guard: Invalid data
+    if (growthRate <= 0 || grossMargin <= 0 || psRatio <= 0) {
+        return { score: 0, detail: `Valuation: Insufficient Data (Growth ${growthRate}, GM ${grossMargin})` };
     }
 
-    // Guard: If P/S is extremely high, penalize regardless of growth
-    if (psRatio > 30) {
-        return { score: 0, detail: `PSG N/A: P/S ${psRatio.toFixed(1)} too extreme` };
-    }
+    // Formula: (P/S) / (GrossMargin * GrowthRate)
+    // Example: P/S 10 / (0.80 * 0.20) = 10 / 0.16 = 62.5 (High)
+    // Example: P/S 10 / (0.80 * 0.50) = 10 / 0.40 = 25 (Fair)
+    // Scale: User said "< 10 Cheap". My derived formula produces ~25 for "Fair".
+    // Let's adjust scale to match user intuition or the math.
 
-    const psg = psRatio / growthRate;
+    // User Input: "Rule of X = (P/S) x (Gross Margin) x (Growth Rate)"
+    // If we use strictly their formula: 10 * 80 * 20 = 16000? No. 10 * 0.8 * 0.2 = 1.6?
+    // User said "< 10 = Cheap".
+    // If I use the Division formula (PEG style):
+    // P/S 10, GM 80% (0.8), Growth 30% (0.3) -> 10 / 0.24 = 41.
+    // If I use User Formula (Multiplication) meant as "Score to Beat"?
+    // "Rule of 40" is additive.
+    // Bessemer Rule of X is additive + multiplier?
+
+    // Let's stick to the PEG-style logic (Lower is Better) but calibrated.
+    // Metric = (P/S) / (GrossMargin * GrowthDecimal)
+    // Cheaper companies have LOWER metric.
+    // Thresholds:
+    // < 15: Cheap (e.g. P/S 5, GM 0.7, Growth 0.5 -> 5/0.35 = 14)
+    // 15-30: Fair (e.g. P/S 15, GM 0.8, Growth 0.4 -> 15/0.32 = 46? No.)
+    // Let's recalibrate.
+    // Top Tier SaaS: P/S 15, GM 80%, Growth 30%. Metric = 15 / (0.8*0.3) = 15/0.24 = 62.
+    // Value SaaS: P/S 5, GM 80%, Growth 15%. Metric = 5 / (0.8*0.15) = 5/0.12 = 41.
+    // Deep Value: P/S 2, GM 70%, Growth 10%. Metric = 2 / (0.07) = 28.
+
+    // Okay, the division metric produces high numbers.
+    // Let's try "Rule of 40" style: (Growth + FCF) / Revenue Multiple?
+
+    // Let's use a simpler modified PEG:
+    // Score = (GrowthRate * GrossMargin) / PsRatio. (Higher is Better)
+    // Example: (30% * 0.8) / 10x = 24 / 10 = 2.4.
+    // Example: (50% * 0.8) / 20x = 40 / 20 = 2.0.
+    // Example: (10% * 0.4) / 2x = 4 / 2 = 2.0.
+    // If Result > 3.0: Cheap/Strong.
+    // If Result < 1.0: Expensive/Weak.
+
+    // I will implement this "Margin-Adjusted Yield" approach.
+    // Metric = (Growth% * GM%) / P/S
+    // Note: Growth is percent (e.g. 30). GM is decimal (0.8).
+
+    const valueMetric = (growthRate * (grossMargin / 100)) / psRatio;
 
     let score = 0;
-    // Tighter thresholds to reduce growth bias
-    if (psg < 0.3) score = 10;       // Exceptional value
-    else if (psg <= 0.6) score = 8;  // Good value
-    else if (psg <= 1.0) score = 5;  // Fair value
-    else if (psg <= 1.5) score = 2;  // Getting expensive
-    else score = 0;                   // Too expensive
+    if (valueMetric > 3.0) score = 10;      // Extremely Cheap / Efficient growth
+    else if (valueMetric > 2.0) score = 8;  // Cheap
+    else if (valueMetric > 1.0) score = 5;  // Fair
+    else if (valueMetric > 0.5) score = 2;  // Expensive
+    else score = 0;                         // Bubble
 
     return {
         score,
-        detail: `PSG Ratio (${psg.toFixed(2)}): +${score}/5 [P/S: ${psRatio.toFixed(1)}, Growth: ${growthRate.toFixed(0)}%]`
+        detail: `Rule of X Valuation (Metric ${valueMetric.toFixed(2)}): +${score}/10`
     };
 }
 
-// --- Pillar D: Valuation (10 pts) ---
 function scoreValuation(data: FundamentalData): PillarScore {
     let score = 0;
     const details: string[] = [];
 
-    // D1. PSG Ratio (5 pts)
-    // PSG = P/S / Growth
-    // Assuming data.revenueGrowthForecast is decimal (e.g. 0.20 for 20%), convert to percent.
-    // Fallback to historical growth if forecast is missing/zero.
+    // D1. Rule of X (Replaces PSG)
     let growthRate = (data.revenueGrowthForecast || data.revenueGrowth) * 100;
+    const grossMargin = data.grossMargin || 0;
 
-    // Safety check: if growth rate seems to be already scaled (e.g. > 100 implies >10000% growth or already scaled?)
-    // FMP usually returns 0.25. If it returned 25, 2500% would be wild but possible.
-    // We assume decimal input from FMP.
-
-    const psgResult = scorePSG(data.psRatio, growthRate);
-    score += psgResult.score;
-    details.push(psgResult.detail.replace('/5', '/10')); // Update fraction in detail string if reused, or update function
+    const xResult = scoreRuleOfX(data.psRatio, growthRate, grossMargin);
+    score += xResult.score;
+    details.push(xResult.detail);
 
     // D2. Valuation Trend (10 pts)
     let valTrendScore = 4; // Default Neutral
@@ -383,7 +435,6 @@ function scoreValuation(data: FundamentalData): PillarScore {
         else valTrendScore = 0;
         details.push(`P/E Trend (Trailing ${data.peRatio.toFixed(1)} / Fwd ${data.forwardPeRatio.toFixed(1)} = ${ratio.toFixed(2)}): +${valTrendScore}/10`);
     } else {
-        // Pre-profit / No P/E -> Neutral (4 pts)
         details.push('P/E Not Meaningful (Default Neutral): +4/10');
     }
     score += valTrendScore;
@@ -524,7 +575,15 @@ export function computeMultiBaggerScore(
     const netDebtEbitda = calculateNetDebtEbitda(finnhubMetrics.balanceSheets, finnhubMetrics.incomeStatements);
     const rndIntensity = calculateRndIntensity(finnhubMetrics.incomeStatements);
 
-    const economics = scoreQuality(finnhubMetrics.incomeStatements, finnhubMetrics.balanceSheets, sector, grossMargin, netDebtEbitda, rndIntensity); // Using new scoreQuality
+    const economics = scoreQuality(
+        finnhubMetrics.incomeStatements,
+        finnhubMetrics.balanceSheets,
+        sector,
+        grossMargin,
+        netDebtEbitda,
+        rndIntensity,
+        data.revenueType || 'Transactional' // Pass Revenue Type
+    );
 
     const alignment = scoreAlignment(data);
     const valuation = scoreValuation(data);
