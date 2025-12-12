@@ -430,8 +430,38 @@ export const analyzeStock = async (ticker: string): Promise<MultiBaggerAnalysis 
 
   console.log(`[Analyzer] Founder status for ${ticker}: ${founderCheck.isFounder} (${founderCheck.reason})`);
 
-  // Insider Ownership Estimation (Placeholder or use keyMetrics if reliable, FMP profile usually has vol/mktcap, not %. We use Computed metrics)
-  const insiderOwnershipPct = 0;
+  // Insider Ownership Estimation (Computed from Trades)
+  // Logic: Sum latest 'securitiesOwned' for each unique reportingCik
+  let insiderOwnershipPct = 0;
+
+  if (insiderTrades && insiderTrades.length > 0 && incomeStatements[0]?.weightedAverageShsOutDil) {
+    const latestHoldings = new Map<string, number>(); // CIK -> SecuritiesOwned
+
+    // Sort by date ascending so we process latest last
+    const sortedTrades = [...insiderTrades].sort((a, b) => new Date(a.transactionDate).getTime() - new Date(b.transactionDate).getTime());
+
+    for (const t of sortedTrades) {
+      if (t.reportingCik && t.securitiesOwned > 0) {
+        latestHoldings.set(t.reportingCik, t.securitiesOwned);
+      }
+    }
+
+    let totalInsiderShares = 0;
+    latestHoldings.forEach(shares => totalInsiderShares += shares);
+
+    const shareCount = incomeStatements[0].weightedAverageShsOutDil;
+    if (shareCount > 0) {
+      insiderOwnershipPct = (totalInsiderShares / shareCount) * 100;
+      // Sanity check: cap at 100
+      if (insiderOwnershipPct > 100) insiderOwnershipPct = 0; // Data error likely
+    }
+
+    console.log(`[Analyzer] Calculated Insider Ownership: ${insiderOwnershipPct.toFixed(1)}% (${(totalInsiderShares / 1e6).toFixed(1)}M / ${(shareCount / 1e6).toFixed(1)}M shares)`);
+  } else {
+    // Fallback?
+    // KeyMetrics sometimes has it?
+    // insiderOwnershipPct = keyMetrics?.insiderOwnership ?? 0; // If available
+  }
 
   // [NEW] Insider Cluster Detection
   // Detects if multiple unique insiders bought within a short window (14 days)

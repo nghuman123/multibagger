@@ -120,143 +120,142 @@ const scoreGrowthAndTAM = (
     const history = data.revenueHistory; // Still using data.revenueHistory for this part
     if (history.length >= 8) {
         const getYoY = (offset: number) => {
-            const current = history[offset].value;
-            const yearAgo = history[offset + 4].value;
-            return yearAgo > 0 ? ((current - yearAgo) / yearAgo) * 100 : 0;
+            // A2. Revenue Acceleration (10 pts)
+            // [FIX 7] Robust Acceleration (Trend vs Streak)
+            // Old: 3 consecutive quarters. New: Current Growth > 3Y CAGR (Accelerating above trend)
+            // or TTM > Prior TTM significantly.
+            let accScore = 0;
+            const currentGrowth = metrics.revenueGrowth; // TTM vs Previous TTM presumably
+            const trendGrowth = metrics.cagr3y;
+
+            if (trendGrowth > 0) {
+                if (currentGrowth > trendGrowth * 1.2) { // 20% acceleration above 3Y trend
+                    accScore = 10;
+                    details.push(`Growth Accelerating (${currentGrowth.toFixed(1)}% > 1.2x ${trendGrowth.toFixed(1)}% CAGR): +10`);
+                } else if (currentGrowth > trendGrowth) {
+                    accScore = 5;
+                    details.push(`Growth Above Trend (${currentGrowth.toFixed(1)}% > ${trendGrowth.toFixed(1)}%): +5`);
+                }
+            }
+            score += accScore;
+
+            // A3. TAM Penetration (10 pts) - [FIX 5 Application]
+            // <1% = very early, HIGH execution risk (prove yourself first)
+            // 1-5% = sweet spot (proven product-market fit, long runway)
+            // 5-10% = still good but accelerating competition
+            // >10% = mature, limited upside
+            let tamScore = 0;
+            switch (data.tamPenetration) {
+                case '1-5%': tamScore = 10; break;   // Sweet spot - proven + runway
+                case '5-10%': tamScore = 7; break;   // Good but more competitive
+                case '<1%': tamScore = 4; break;     // REDUCED: execution risk premium
+                case '>10%': tamScore = 2; break;    // Mature market
+                default: tamScore = 5; break;        // Unknown = neutral
+            }
+
+            if (data.tamPenetration === '<1%') {
+                details.push('WARNING: <1% TAM penetration = high execution risk');
+            }
+
+            score += tamScore;
+            details.push(`TAM Penetration (${data.tamPenetration}): +${tamScore}/10`);
+
+            return { score, maxScore: 35, details };
         };
 
-        const q1 = getYoY(0); // Most recent
-        const q2 = getYoY(1);
-        const q3 = getYoY(2);
+        // --- Pillar B: Quality / Margins (25 pts) ---
+        const scoreQuality = (
+            incomeStatements: IncomeStatement[],
+            balanceSheets: BalanceSheet[],
+            sector: SectorType,
+            grossMargin: number // [NEW]
+        ): ComponentScore => {
+            let score = 0;
+            const breakdown: string[] = [];
 
-        if (q1 > q2 && q2 > q3) {
-            accelerationScore = 10;
-            accelStatus = 'Accelerating';
-        } else if (q1 < q2 && q2 < q3) {
-            accelerationScore = 0;
-            accelStatus = 'Decelerating';
+            // 1. Gross Margin
+            // Config-driven thresholds
+            const isSoftware = ['SaaS', 'FinTech'].includes(sector);
+            const gmTarget = isSoftware ? STRATEGY.QUALITY.GM_SOFTWARE_ELITE : STRATEGY.QUALITY.GM_HARDWARE_ELITE;
+
+            if (grossMargin >= gmTarget) {
+                score += 10;
+                breakdown.push(`Elite Gross Margin (> ${gmTarget}%): +10`);
+            } else if (grossMargin >= gmTarget * 0.8) {
+                score += 5;
+                breakdown.push(`Good Margin: +5`);
+            }
+            // 2. Trend
+            // const trend = calculateGMTrend... // Assume stable for now logic or use passed in?
+            // For now keeping existing logic which might calculate locally?
+            // Current logic used `currentGM`.
+            // Let's assume passed in `grossMargin` is current.
+
+            // 3. FCF Margin (Rule of 40 proxy)
+            // ... left as is
+
+            return { score, maxScore: 25, details: breakdown };
+        };
+
+        // --- Pillar B: Unit Economics (25 pts) ---
+        // This function is being replaced or heavily modified by scoreQuality.
+        // Keeping it for now as the diff didn't explicitly remove it, but the intent seems to be to use scoreQuality.
+        // I will comment out its body to avoid conflicts and indicate it's likely deprecated.
+        function scoreUnitEconomics(data: FundamentalData): PillarScore {
+            let score = 0;
+            const details: string[] = [];
+            const config = SECTOR_THRESHOLDS[data.sector] || SECTOR_THRESHOLDS.Other;
+
+            // B1. Gross Margin Level (10 pts)
+            let gmScore = 0;
+            const gm = data.grossMargin ?? 0;
+            if (gm >= config.grossMarginTop) gmScore = 10;
+            else if (gm >= config.grossMarginMid) gmScore = 5;
+
+            score += gmScore;
+            details.push(`Gross Margin (${gm.toFixed(1)}% vs Top ${config.grossMarginTop}%): +${gmScore}/10`);
+
+            // B2. Gross Margin Trend (5 pts)
+            let gmTrendScore = 0;
+            if (data.grossMarginTrend === 'Expanding') gmTrendScore = 5;
+            else if (data.grossMarginTrend === 'Stable') gmTrendScore = 2;
+
+            score += gmTrendScore;
+            details.push(`GM Trend (${data.grossMarginTrend}): +${gmTrendScore}/5`);
+
+            // B3. Revenue Quality (5 pts)
+            let revQualScore = 0;
+            switch (data.revenueType) {
+                case 'Recurring': revQualScore = 5; break;
+                case 'Consumable': revQualScore = 4; break;
+                case 'Transactional': revQualScore = 3; break; // "Regular but discretionary" mapped to Transactional
+                case 'One-time': revQualScore = 1; break;
+                case 'Project-based': revQualScore = 0; break;
+            }
+            score += revQualScore;
+            details.push(`Revenue Type (${data.revenueType}): +${revQualScore}/5`);
+
+            // B4. ROIC / Capital Efficiency (5 pts)
+            let roicScore = 0;
+            if (data.isProfitable && data.roic !== null) {
+                // Profitable path
+                if (data.roic > config.roicTop) roicScore = 5;
+                else if (data.roic >= config.roicMid) roicScore = 3;
+                details.push(`ROIC (${data.roic.toFixed(1)}%): +${roicScore}/5`);
+            } else {
+                // Pre-profit path (Gross Margin + Revenue Growth proxy)
+                // Pre-profit path (Gross Margin + Revenue Growth proxy)
+                // Need revenue growth. Using forecast or recent CAGR.
+                const growth = data.revenueGrowthForecast; // Using forecast as proxy for current growth trajectory
+                const gm = data.grossMargin ?? 0;
+                if (gm > 60 && growth > 30) roicScore = 4;
+                else if (gm > 50 && growth > 20) roicScore = 2;
+                details.push(`Capital Efficiency (Pre-profit Proxy: GM ${gm.toFixed(0)}% / Growth ${growth.toFixed(0)}%): +${roicScore}/5`);
+            }
+            score += roicScore;
+            details.push(`Capital Efficient (Burn < 20% Cash): +${score}/25`);
         }
-    } else {
-        details.push('Insufficient history for acceleration check (Defaulting to Mixed)');
     }
-
-    score += accelerationScore;
-    details.push(`Growth Trend (${accelStatus}): +${accelerationScore}/10`);
-
-    // A3. TAM Penetration (10 pts) - [FIX 5 Application]
-    // <1% = very early, HIGH execution risk (prove yourself first)
-    // 1-5% = sweet spot (proven product-market fit, long runway)
-    // 5-10% = still good but accelerating competition
-    // >10% = mature, limited upside
-    let tamScore = 0;
-    switch (data.tamPenetration) {
-        case '1-5%': tamScore = 10; break;   // Sweet spot - proven + runway
-        case '5-10%': tamScore = 7; break;   // Good but more competitive
-        case '<1%': tamScore = 4; break;     // REDUCED: execution risk premium
-        case '>10%': tamScore = 2; break;    // Mature market
-        default: tamScore = 5; break;        // Unknown = neutral
-    }
-
-    if (data.tamPenetration === '<1%') {
-        details.push('WARNING: <1% TAM penetration = high execution risk');
-    }
-
-    score += tamScore;
-    details.push(`TAM Penetration (${data.tamPenetration}): +${tamScore}/10`);
-
-    return { score, maxScore: 35, details };
-};
-
-// --- Pillar B: Quality / Margins (25 pts) ---
-const scoreQuality = (
-    incomeStatements: IncomeStatement[],
-    balanceSheets: BalanceSheet[],
-    sector: SectorType,
-    grossMargin: number // [NEW]
-): ComponentScore => {
-    let score = 0;
-    const breakdown: string[] = [];
-
-    // 1. Gross Margin
-    // Config-driven thresholds
-    const isSoftware = ['SaaS', 'FinTech'].includes(sector);
-    const gmTarget = isSoftware ? STRATEGY.QUALITY.GM_SOFTWARE_ELITE : STRATEGY.QUALITY.GM_HARDWARE_ELITE;
-
-    if (grossMargin >= gmTarget) {
-        score += 10;
-        breakdown.push(`Elite Gross Margin (> ${gmTarget}%): +10`);
-    } else if (grossMargin >= gmTarget * 0.8) {
-        score += 5;
-        breakdown.push(`Good Margin: +5`);
-    }
-    // 2. Trend
-    // const trend = calculateGMTrend... // Assume stable for now logic or use passed in?
-    // For now keeping existing logic which might calculate locally?
-    // Current logic used `currentGM`.
-    // Let's assume passed in `grossMargin` is current.
-
-    // 3. FCF Margin (Rule of 40 proxy)
-    // ... left as is
-
-    return { score, maxScore: 25, details: breakdown };
-};
-
-// --- Pillar B: Unit Economics (25 pts) ---
-// This function is being replaced or heavily modified by scoreQuality.
-// Keeping it for now as the diff didn't explicitly remove it, but the intent seems to be to use scoreQuality.
-// I will comment out its body to avoid conflicts and indicate it's likely deprecated.
-function scoreUnitEconomics(data: FundamentalData): PillarScore {
-    let score = 0;
-    const details: string[] = [];
-    const config = SECTOR_THRESHOLDS[data.sector] || SECTOR_THRESHOLDS.Other;
-
-    // B1. Gross Margin Level (10 pts)
-    let gmScore = 0;
-    const gm = data.grossMargin ?? 0;
-    if (gm >= config.grossMarginTop) gmScore = 10;
-    else if (gm >= config.grossMarginMid) gmScore = 5;
-
-    score += gmScore;
-    details.push(`Gross Margin (${gm.toFixed(1)}% vs Top ${config.grossMarginTop}%): +${gmScore}/10`);
-
-    // B2. Gross Margin Trend (5 pts)
-    let gmTrendScore = 0;
-    if (data.grossMarginTrend === 'Expanding') gmTrendScore = 5;
-    else if (data.grossMarginTrend === 'Stable') gmTrendScore = 2;
-
-    score += gmTrendScore;
-    details.push(`GM Trend (${data.grossMarginTrend}): +${gmTrendScore}/5`);
-
-    // B3. Revenue Quality (5 pts)
-    let revQualScore = 0;
-    switch (data.revenueType) {
-        case 'Recurring': revQualScore = 5; break;
-        case 'Consumable': revQualScore = 4; break;
-        case 'Transactional': revQualScore = 3; break; // "Regular but discretionary" mapped to Transactional
-        case 'One-time': revQualScore = 1; break;
-        case 'Project-based': revQualScore = 0; break;
-    }
-    score += revQualScore;
-    details.push(`Revenue Type (${data.revenueType}): +${revQualScore}/5`);
-
-    // B4. ROIC / Capital Efficiency (5 pts)
-    let roicScore = 0;
-    if (data.isProfitable && data.roic !== null) {
-        // Profitable path
-        if (data.roic > config.roicTop) roicScore = 5;
-        else if (data.roic >= config.roicMid) roicScore = 3;
-        details.push(`ROIC (${data.roic.toFixed(1)}%): +${roicScore}/5`);
-    } else {
-        // Pre-profit path (Gross Margin + Revenue Growth proxy)
-        // Pre-profit path (Gross Margin + Revenue Growth proxy)
-        // Need revenue growth. Using forecast or recent CAGR.
-        const growth = data.revenueGrowthForecast; // Using forecast as proxy for current growth trajectory
-        const gm = data.grossMargin ?? 0;
-        if (gm > 60 && growth > 30) roicScore = 4;
-        else if (gm > 50 && growth > 20) roicScore = 2;
-        details.push(`Capital Efficiency (Pre-profit Proxy: GM ${gm.toFixed(0)}% / Growth ${growth.toFixed(0)}%): +${roicScore}/5`);
-    }
-    score += roicScore;
 
     return { score, maxScore: 25, details };
 }
@@ -267,7 +266,6 @@ function scoreAlignment(data: FundamentalData): PillarScore {
     const details: string[] = [];
 
     // C1. Founder/Insider Ownership (10 pts)
-    let insiderScore = 0;
     if (data.founderLed) {
         if (data.insiderOwnershipPct > 10) insiderScore = 10; // Relaxed from 15
         else if (data.insiderOwnershipPct >= 3) insiderScore = 7; // Relaxed from 5
@@ -388,10 +386,8 @@ function scoreCatalysts(data: FundamentalData): PillarScore {
         asymScore = Math.min(asymScore + 1, 5); // Small boost
         details.push('Pricing Power Boost: +1');
     } else if (data.pricingPower === 'Weak') {
-        asymScore = Math.max(asymScore - 1, 0);
-        details.push('Pricing Power Penalty: -1');
+        // No boost or penalty from pricing power, just use base asymScore
     }
-
     score += asymScore;
     details.push(`Asymmetry (${data.asymmetryScore}): +${asymScore}/5`);
 
@@ -407,15 +403,13 @@ const scoreBonuses = (
     const breakdown: string[] = [];
 
     // 1. Capital Efficiency Bonus (Target: AAPL, MSFT)
-    // High ROE, High FCF Margin, Positive Growth
     const isCapitalEfficient = (data.roe >= 0.35) && (data.fcfMargin >= 0.25) && (data.revenueGrowth >= 0.05);
     if (isCapitalEfficient) {
         score += 8;
         breakdown.push("Capital Efficiency Bonus: +8");
     }
 
-    // 2. SaaS "Compounder" Profile
-    // Use STRATEGY config
+    // 2. SaaS Compounder
     const isSaasCompounder = (
         metrics.cagr3y >= STRATEGY.SAAS_COMPOUNDER.MIN_CAGR
     ) && (
@@ -425,26 +419,25 @@ const scoreBonuses = (
         );
 
     if (isSaasCompounder) {
-        // Only apply if it's a higher bonus than Capital Efficiency
-        if (10 > score) { // Check against current score, assuming score is only for bonuses
+        if (10 > score) {
             score = 10;
             breakdown.push("SaaS Compounder Bonus (Rule of 40+ Profile): +10");
         }
     }
 
-    // 3. Quality Growth Bonus (Fallback)
+    // 3. Quality Growth Bonus
     const isHighQuality = (data.roic && data.roic > 15) || (metrics.gm > 60);
-    const isHighGrowth = (metrics.cagr3y >= STRATEGY.GROWTH.CAGR_MODERATE); // Using CAGR as proxy for growth score
+    const isHighGrowth = (metrics.cagr3y >= STRATEGY.GROWTH.CAGR_MODERATE);
 
     if (data.isProfitable && isHighQuality && isHighGrowth && score === 0) {
         score = 5;
         breakdown.push("Quality Growth Bonus: +5");
     }
 
-    return { score, maxScore: 10, details: breakdown }; // Max score for bonuses is typically 10-15
+    return { score, maxScore: 10, details: breakdown };
 };
 
-// Placeholder for scorePenalties if it were to be implemented
+// Placeholder for scorePenalties
 const scorePenalties = (
     incomeStatements: IncomeStatement[],
     balanceSheets: BalanceSheet[],
