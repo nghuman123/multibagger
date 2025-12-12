@@ -1,5 +1,5 @@
 import { StockMetricData, StockCompany, MultiBaggerScore, PillarScore } from '../types';
-import { calculateQuantitativeScore } from './scoring/quantScore';
+// import { calculateQuantitativeScore } from './scoring/quantScore'; // [REMOVED]
 import { SECTOR_THRESHOLDS } from './scoring/multiBaggerScore';
 
 // Helper: Get thresholds safely

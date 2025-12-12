@@ -1,8 +1,25 @@
-import { FundamentalData, MultiBaggerScore, FinnhubMetrics, IncomeStatement, BalanceSheet } from '../../types';
-import { PillarScore, ComponentScore } from '../../src/types/scoring';
+import {
+    FundamentalData,
+    FinnhubMetrics,
+    MultiBaggerScore,
+    SectorType,
+    IncomeStatement,
+    BalanceSheet,
+    CashFlowStatement
+} from '../../types';
 import { STRATEGY } from '../../config/strategyConfig';
-import { calcTTM } from '../utils/financialUtils';
-import { SectorType } from '../../types'; // Keep this as it's used in SECTOR_THRESHOLDS and scoreUnitEconomics
+import { calcTTM, calculateGrowthMetrics, calculateGrossMargin, calculateNetDebtEbitda, calculateRndIntensity } from '../utils/financialUtils';
+
+// Define local interfaces if not in types
+interface ComponentScore {
+    score: number;
+    maxScore: number;
+    details: string[];
+}
+
+interface PillarScore extends ComponentScore { }
+// export const SECTOR_THRESHOLDS = STRATEGY.SECTOR_THRESHOLDS || {}; // Removed duplicate
+
 
 // ============================================================================
 // 1. CONFIGURATION (Sector Thresholds)
@@ -90,17 +107,17 @@ const scoreGrowthAndTAM = (
     let score = 0;
     const details: string[] = [];
 
-    // A1. Revenue CAGR (15 pts) - [FIX 6 Application]
+    // A1. Revenue CAGR (10 pts) - [FIX 6 Application]
     const cagr = metrics.cagr3y;
 
     let cagrScore = 0;
     // Use STRATEGY thresholds
     if (cagr >= STRATEGY.GROWTH.CAGR_ELITE) {
-        cagrScore = 15;
-    } else if (cagr >= STRATEGY.GROWTH.CAGR_HIGH) {
         cagrScore = 10;
+    } else if (cagr >= STRATEGY.GROWTH.CAGR_HIGH) {
+        cagrScore = 7;
     } else if (cagr >= STRATEGY.GROWTH.CAGR_MODERATE) {
-        cagrScore = 5;
+        cagrScore = 4;
     }
 
     // Apply history penalty (if dynamic CAGR was used, this would be applied)
@@ -108,155 +125,164 @@ const scoreGrowthAndTAM = (
     // cagrScore = Math.max(0, cagrScore + cagrResult.penalty); // This line is from old logic
 
     score += cagrScore;
-    details.push(`Revenue CAGR (~${cagr.toFixed(1)}%): +${cagrScore}/15`);
+    details.push(`Revenue CAGR (~${cagr.toFixed(1)}%): +${cagrScore}/10`);
 
-    // A2. Growth Acceleration (10 pts)
-    // Compare YoY growth of recent quarters.
-    // Need at least 5 quarters to calculate YoY for the last 1 quarter.
-    // To check acceleration over 3 quarters, we need ~7-8 quarters of history.
-    let accelerationScore = 5; // Default to Flat/Mixed
-    let accelStatus = 'Flat/Mixed';
+    // A2. Growth Acceleration (7 pts)
+    let accelerationScore = 3; // Base
+    const history = data.revenueHistory || [];
 
-    const history = data.revenueHistory; // Still using data.revenueHistory for this part
-    if (history.length >= 8) {
-        const getYoY = (offset: number) => {
-            // A2. Revenue Acceleration (10 pts)
-            // [FIX 7] Robust Acceleration (Trend vs Streak)
-            // Old: 3 consecutive quarters. New: Current Growth > 3Y CAGR (Accelerating above trend)
-            // or TTM > Prior TTM significantly.
-            let accScore = 0;
-            const currentGrowth = metrics.revenueGrowth; // TTM vs Previous TTM presumably
-            const trendGrowth = metrics.cagr3y;
+    // Calculate acceleration if we have enough history
+    if (history.length >= 4) { // Reduced requirement for practicality, checks recent qtrs
+        const currentQ = history[0]?.value || 0;
+        const prevQ = history[4]?.value || 0; // YoY
+        // Implementation logic handled via metrics passed in (lastYearGrowth vs cagr) usually.
+        // Re-using the checks from "getYoY" logic but simplified here or relying on metrics.
+        // For now, we trust metrics.cagr3y and manual check if needed.
 
-            if (trendGrowth > 0) {
-                if (currentGrowth > trendGrowth * 1.2) { // 20% acceleration above 3Y trend
-                    accScore = 10;
-                    details.push(`Growth Accelerating (${currentGrowth.toFixed(1)}% > 1.2x ${trendGrowth.toFixed(1)}% CAGR): +10`);
-                } else if (currentGrowth > trendGrowth) {
-                    accScore = 5;
-                    details.push(`Growth Above Trend (${currentGrowth.toFixed(1)}% > ${trendGrowth.toFixed(1)}%): +5`);
-                }
+        const currentGrowth = metrics.lastYearGrowth; // Assuming decimal
+        const trendGrowth = metrics.cagr3y;
+
+        if (trendGrowth > 0) {
+            if (currentGrowth > trendGrowth * 1.2) {
+                accelerationScore = 7;
+                details.push(`Growth Accelerating (${currentGrowth.toFixed(1)}% > 1.2x ${trendGrowth.toFixed(1)}% CAGR): +7`);
+            } else if (currentGrowth > trendGrowth) {
+                accelerationScore = 5;
+                details.push(`Growth Above Trend (${currentGrowth.toFixed(1)}% > ${trendGrowth.toFixed(1)}%): +5`);
             }
-            score += accScore;
+        }
+    }
+    score += accelerationScore;
 
-            // A3. TAM Penetration (10 pts) - [FIX 5 Application]
-            // <1% = very early, HIGH execution risk (prove yourself first)
-            // 1-5% = sweet spot (proven product-market fit, long runway)
-            // 5-10% = still good but accelerating competition
-            // >10% = mature, limited upside
-            let tamScore = 0;
-            switch (data.tamPenetration) {
-                case '1-5%': tamScore = 10; break;   // Sweet spot - proven + runway
-                case '5-10%': tamScore = 7; break;   // Good but more competitive
-                case '<1%': tamScore = 4; break;     // REDUCED: execution risk premium
-                case '>10%': tamScore = 2; break;    // Mature market
-                default: tamScore = 5; break;        // Unknown = neutral
-            }
+    // A3. TAM Penetration (8 pts)
+    let tamScore = 0;
+    switch (data.tamPenetration) {
+        case '<1%': tamScore = 8; break;    // [FIX 11] Massive runway
+        case '1-5%': tamScore = 6; break;
+        case '5-10%': tamScore = 4; break;
+        case '>10%': tamScore = 2; break;   // Saturated
+        default: tamScore = 4; break;
+    }
+    // if (data.tamPenetration === '<1%') details.push('WARNING: <1% TAM penetration = high execution risk'); // [REMOVED] Backwards logic
 
-            if (data.tamPenetration === '<1%') {
-                details.push('WARNING: <1% TAM penetration = high execution risk');
-            }
+    score += tamScore;
+    details.push(`TAM Penetration (${data.tamPenetration}): +${tamScore}/8`);
 
-            score += tamScore;
-            details.push(`TAM Penetration (${data.tamPenetration}): +${tamScore}/10`);
+    return { score, maxScore: 25, details };
+}
 
-            return { score, maxScore: 35, details };
-        };
+// --- Pillar B: Quality / Margins (25 pts) ---
+const scoreQuality = (
+    balanceSheets: BalanceSheet[],
+    sector: SectorType,
+    grossMargin: number, // [NEW]
+    netDebtEbitda: number | null, // [FIX 11]
+    rndIntensity: number // [FIX 11]
+): ComponentScore => {
+    let score = 0;
+    const breakdown: string[] = [];
 
-        // --- Pillar B: Quality / Margins (25 pts) ---
-        const scoreQuality = (
-            incomeStatements: IncomeStatement[],
-            balanceSheets: BalanceSheet[],
-            sector: SectorType,
-            grossMargin: number // [NEW]
-        ): ComponentScore => {
-            let score = 0;
-            const breakdown: string[] = [];
+    // 1. Gross Margin
+    // Config-driven thresholds
+    const isSoftware = ['SaaS', 'FinTech'].includes(sector);
+    const gmTarget = isSoftware ? STRATEGY.QUALITY.GM_SOFTWARE_ELITE : STRATEGY.QUALITY.GM_HARDWARE_ELITE;
 
-            // 1. Gross Margin
-            // Config-driven thresholds
-            const isSoftware = ['SaaS', 'FinTech'].includes(sector);
-            const gmTarget = isSoftware ? STRATEGY.QUALITY.GM_SOFTWARE_ELITE : STRATEGY.QUALITY.GM_HARDWARE_ELITE;
+    if (grossMargin >= gmTarget) {
+        score += 10;
+        breakdown.push(`Elite Gross Margin (> ${gmTarget}%): +10`);
+    } else if (grossMargin >= gmTarget * 0.8) {
+        score += 5;
+        breakdown.push(`Good Margin: +5`);
+    }
+    // 2. Trend
+    // const trend = calculateGMTrend... // Assume stable for now logic or use passed in?
+    // For now keeping existing logic which might calculate locally?
+    // Current logic used `currentGM`.
+    // Let's assume passed in `grossMargin` is current.
 
-            if (grossMargin >= gmTarget) {
-                score += 10;
-                breakdown.push(`Elite Gross Margin (> ${gmTarget}%): +10`);
-            } else if (grossMargin >= gmTarget * 0.8) {
-                score += 5;
-                breakdown.push(`Good Margin: +5`);
-            }
-            // 2. Trend
-            // const trend = calculateGMTrend... // Assume stable for now logic or use passed in?
-            // For now keeping existing logic which might calculate locally?
-            // Current logic used `currentGM`.
-            // Let's assume passed in `grossMargin` is current.
+    // 3. FCF Margin (Rule of 40 proxy)
+    // ... left as is
 
-            // 3. FCF Margin (Rule of 40 proxy)
-            // ... left as is
-
-            return { score, maxScore: 25, details: breakdown };
-        };
-
-        // --- Pillar B: Unit Economics (25 pts) ---
-        // This function is being replaced or heavily modified by scoreQuality.
-        // Keeping it for now as the diff didn't explicitly remove it, but the intent seems to be to use scoreQuality.
-        // I will comment out its body to avoid conflicts and indicate it's likely deprecated.
-        function scoreUnitEconomics(data: FundamentalData): PillarScore {
-            let score = 0;
-            const details: string[] = [];
-            const config = SECTOR_THRESHOLDS[data.sector] || SECTOR_THRESHOLDS.Other;
-
-            // B1. Gross Margin Level (10 pts)
-            let gmScore = 0;
-            const gm = data.grossMargin ?? 0;
-            if (gm >= config.grossMarginTop) gmScore = 10;
-            else if (gm >= config.grossMarginMid) gmScore = 5;
-
-            score += gmScore;
-            details.push(`Gross Margin (${gm.toFixed(1)}% vs Top ${config.grossMarginTop}%): +${gmScore}/10`);
-
-            // B2. Gross Margin Trend (5 pts)
-            let gmTrendScore = 0;
-            if (data.grossMarginTrend === 'Expanding') gmTrendScore = 5;
-            else if (data.grossMarginTrend === 'Stable') gmTrendScore = 2;
-
-            score += gmTrendScore;
-            details.push(`GM Trend (${data.grossMarginTrend}): +${gmTrendScore}/5`);
-
-            // B3. Revenue Quality (5 pts)
-            let revQualScore = 0;
-            switch (data.revenueType) {
-                case 'Recurring': revQualScore = 5; break;
-                case 'Consumable': revQualScore = 4; break;
-                case 'Transactional': revQualScore = 3; break; // "Regular but discretionary" mapped to Transactional
-                case 'One-time': revQualScore = 1; break;
-                case 'Project-based': revQualScore = 0; break;
-            }
-            score += revQualScore;
-            details.push(`Revenue Type (${data.revenueType}): +${revQualScore}/5`);
-
-            // B4. ROIC / Capital Efficiency (5 pts)
-            let roicScore = 0;
-            if (data.isProfitable && data.roic !== null) {
-                // Profitable path
-                if (data.roic > config.roicTop) roicScore = 5;
-                else if (data.roic >= config.roicMid) roicScore = 3;
-                details.push(`ROIC (${data.roic.toFixed(1)}%): +${roicScore}/5`);
-            } else {
-                // Pre-profit path (Gross Margin + Revenue Growth proxy)
-                // Pre-profit path (Gross Margin + Revenue Growth proxy)
-                // Need revenue growth. Using forecast or recent CAGR.
-                const growth = data.revenueGrowthForecast; // Using forecast as proxy for current growth trajectory
-                const gm = data.grossMargin ?? 0;
-                if (gm > 60 && growth > 30) roicScore = 4;
-                else if (gm > 50 && growth > 20) roicScore = 2;
-                details.push(`Capital Efficiency (Pre-profit Proxy: GM ${gm.toFixed(0)}% / Growth ${growth.toFixed(0)}%): +${roicScore}/5`);
-            }
-            score += roicScore;
-            details.push(`Capital Efficient (Burn < 20% Cash): +${score}/25`);
+    // 4. [FIX 11] Net Debt / EBITDA (Leverage)
+    if (netDebtEbitda !== null) {
+        if (netDebtEbitda < 1.0) {
+            score += 2;
+            breakdown.push(`Strong Balance Sheet (Net Debt/EBITDA ${netDebtEbitda.toFixed(2)} < 1x): +2`);
+        } else if (netDebtEbitda > 4.0) {
+            score -= 2;
+            breakdown.push(`High Leverage (Net Debt/EBITDA ${netDebtEbitda.toFixed(2)} > 4x): -2`);
         }
     }
 
+    // 5. [FIX 11] R&D Intensity (Innovation)
+    if (rndIntensity > 15) {
+        score += 2;
+        breakdown.push(`High Innovation (R&D ${rndIntensity.toFixed(1)}% > 15%): +2`);
+    }
+
+    // Cap Score at 25
+    score = Math.min(score, 25);
+
+    return { score, maxScore: 25, details: breakdown };
+};
+
+// --- Pillar B: Unit Economics (25 pts) ---
+// This function is being replaced or heavily modified by scoreQuality.
+// Keeping it for now as the diff didn't explicitly remove it, but the intent seems to be to use scoreQuality.
+// I will comment out its body to avoid conflicts and indicate it's likely deprecated.
+function scoreUnitEconomics(data: FundamentalData): PillarScore {
+    let score = 0;
+    const details: string[] = [];
+    const config = SECTOR_THRESHOLDS[data.sector] || SECTOR_THRESHOLDS.Other;
+
+    // B1. Gross Margin Level (10 pts)
+    let gmScore = 0;
+    const gm = data.grossMargin ?? 0;
+    if (gm >= config.grossMarginTop) gmScore = 10;
+    else if (gm >= config.grossMarginMid) gmScore = 5;
+
+    score += gmScore;
+    details.push(`Gross Margin (${gm.toFixed(1)}% vs Top ${config.grossMarginTop}%): +${gmScore}/10`);
+
+    // B2. Gross Margin Trend (5 pts)
+    let gmTrendScore = 0;
+    if (data.grossMarginTrend === 'Expanding') gmTrendScore = 5;
+    else if (data.grossMarginTrend === 'Stable') gmTrendScore = 2;
+
+    score += gmTrendScore;
+    details.push(`GM Trend (${data.grossMarginTrend}): +${gmTrendScore}/5`);
+
+    // B3. Revenue Quality (5 pts)
+    let revQualScore = 0;
+    switch (data.revenueType) {
+        case 'Recurring': revQualScore = 5; break;
+        case 'Consumable': revQualScore = 4; break;
+        case 'Transactional': revQualScore = 3; break; // "Regular but discretionary" mapped to Transactional
+        case 'One-time': revQualScore = 1; break;
+        case 'Project-based': revQualScore = 0; break;
+    }
+    score += revQualScore;
+    details.push(`Revenue Type (${data.revenueType}): +${revQualScore}/5`);
+
+    // B4. ROIC / Capital Efficiency (5 pts)
+    let roicScore = 0;
+    if (data.isProfitable && data.roic !== null) {
+        // Profitable path
+        if (data.roic > config.roicTop) roicScore = 5;
+        else if (data.roic >= config.roicMid) roicScore = 3;
+        details.push(`ROIC (${data.roic.toFixed(1)}%): +${roicScore}/5`);
+    } else {
+        // Pre-profit path (Gross Margin + Revenue Growth proxy)
+        // Pre-profit path (Gross Margin + Revenue Growth proxy)
+        // Need revenue growth. Using forecast or recent CAGR.
+        const growth = data.revenueGrowthForecast; // Using forecast as proxy for current growth trajectory
+        const gm = data.grossMargin ?? 0;
+        if (gm > 60 && growth > 30) roicScore = 4;
+        else if (gm > 50 && growth > 20) roicScore = 2;
+        details.push(`Capital Efficiency (Pre-profit Proxy: GM ${gm.toFixed(0)}% / Growth ${growth.toFixed(0)}%): +${roicScore}/5`);
+    }
+    score += roicScore;
+    details.push(`Capital Efficient (Burn < 20% Cash): +${score}/25`);
     return { score, maxScore: 25, details };
 }
 
@@ -265,19 +291,20 @@ function scoreAlignment(data: FundamentalData): PillarScore {
     let score = 0;
     const details: string[] = [];
 
-    // C1. Founder/Insider Ownership (10 pts)
+    // C1. Founder/Insider Ownership (7 pts)
+    let insiderScore = 0; // Initialize insiderScore
     if (data.founderLed) {
-        if (data.insiderOwnershipPct > 10) insiderScore = 10; // Relaxed from 15
-        else if (data.insiderOwnershipPct >= 3) insiderScore = 7; // Relaxed from 5
-        else if (data.insiderOwnershipPct >= 0.5) insiderScore = 3; // Relaxed from 1
+        if (data.insiderOwnershipPct > 10) insiderScore = 7;
+        else if (data.insiderOwnershipPct >= 3) insiderScore = 5;
+        else if (data.insiderOwnershipPct >= 0.5) insiderScore = 2;
     } else {
         // Non-founder led
-        if (data.insiderOwnershipPct > 10) insiderScore = 5;
-        else if (data.insiderOwnershipPct >= 3) insiderScore = 3;
+        if (data.insiderOwnershipPct > 10) insiderScore = 4;
+        else if (data.insiderOwnershipPct >= 3) insiderScore = 2;
         else if (data.insiderOwnershipPct >= 0.5) insiderScore = 1;
     }
     score += insiderScore;
-    details.push(`Insider Ownership (${data.insiderOwnershipPct.toFixed(1)}%, Founder: ${data.founderLed}): +${insiderScore}/10`);
+    details.push(`Insider Ownership (${data.insiderOwnershipPct.toFixed(1)}%, Founder: ${data.founderLed}): +${insiderScore}/7`);
 
     // C2. Insider Buying (5 pts)
     let buyingScore = 0;
@@ -287,16 +314,16 @@ function scoreAlignment(data: FundamentalData): PillarScore {
     score += buyingScore;
     details.push(`Insider Activity (${data.netInsiderBuying}): +${buyingScore}/5`);
 
-    // C3. Institutional Ownership (5 pts)
+    // C3. Institutional Ownership (3 pts)
     let instScore = 0;
     const inst = data.institutionalOwnershipPct;
-    if (inst >= 30 && inst <= 85) instScore = 5; // Relaxed upper bound from 70
-    else if (inst > 85) instScore = 3;
-    else if (inst < 30) instScore = 2;
+    if (inst >= 30 && inst <= 85) instScore = 3;
+    else if (inst > 85) instScore = 1;
+    else if (inst < 30) instScore = 1;
     score += instScore;
-    details.push(`Institutional Ownership (${inst.toFixed(1)}%): +${instScore}/5`);
+    details.push(`Institutional Ownership (${inst.toFixed(1)}%): +${instScore}/3`);
 
-    return { score, maxScore: 20, details };
+    return { score, maxScore: 15, details };
 }
 
 // --- Pillar D: Valuation (10 pts) ---
@@ -316,10 +343,10 @@ function scorePSG(psRatio: number, growthRate: number): { score: number; detail:
 
     let score = 0;
     // Tighter thresholds to reduce growth bias
-    if (psg < 0.3) score = 5;        // Exceptional value
-    else if (psg <= 0.6) score = 4;  // Good value
-    else if (psg <= 1.0) score = 2;  // Fair value
-    else if (psg <= 1.5) score = 1;  // Getting expensive
+    if (psg < 0.3) score = 10;       // Exceptional value
+    else if (psg <= 0.6) score = 8;  // Good value
+    else if (psg <= 1.0) score = 5;  // Fair value
+    else if (psg <= 1.5) score = 2;  // Getting expensive
     else score = 0;                   // Too expensive
 
     return {
@@ -345,23 +372,23 @@ function scoreValuation(data: FundamentalData): PillarScore {
 
     const psgResult = scorePSG(data.psRatio, growthRate);
     score += psgResult.score;
-    details.push(psgResult.detail);
+    details.push(psgResult.detail.replace('/5', '/10')); // Update fraction in detail string if reused, or update function
 
-    // D2. Valuation Trend (5 pts)
-    let valTrendScore = 2; // Default Neutral
+    // D2. Valuation Trend (10 pts)
+    let valTrendScore = 4; // Default Neutral
     if (data.peRatio && data.forwardPeRatio && data.peRatio > 0 && data.forwardPeRatio > 0) {
         const ratio = data.peRatio / data.forwardPeRatio;
-        if (ratio > 1.1) valTrendScore = 5; // Relaxed from 1.2
-        else if (ratio >= 1.0) valTrendScore = 3;
+        if (ratio > 1.1) valTrendScore = 10;
+        else if (ratio >= 1.0) valTrendScore = 6;
         else valTrendScore = 0;
-        details.push(`P/E Trend (Trailing ${data.peRatio.toFixed(1)} / Fwd ${data.forwardPeRatio.toFixed(1)} = ${ratio.toFixed(2)}): +${valTrendScore}/5`);
+        details.push(`P/E Trend (Trailing ${data.peRatio.toFixed(1)} / Fwd ${data.forwardPeRatio.toFixed(1)} = ${ratio.toFixed(2)}): +${valTrendScore}/10`);
     } else {
-        // Pre-profit / No P/E -> Neutral (2 pts)
-        details.push('P/E Not Meaningful (Default Neutral): +2/5');
+        // Pre-profit / No P/E -> Neutral (4 pts)
+        details.push('P/E Not Meaningful (Default Neutral): +4/10');
     }
     score += valTrendScore;
 
-    return { score, maxScore: 10, details };
+    return { score, maxScore: 20, details };
 }
 
 // --- Pillar E: Catalysts (10 pts) ---
@@ -369,29 +396,47 @@ function scoreCatalysts(data: FundamentalData): PillarScore {
     let score = 0;
     const details: string[] = [];
 
-    // E1. Catalyst Density (5 pts)
+    // E1. Catalyst Density (8 pts)
     let catScore = 0;
-    if (data.catalystDensity === 'High') catScore = 5;
-    else if (data.catalystDensity === 'Medium') catScore = 3;
+    if (data.catalystDensity === 'High') catScore = 8;
+    else if (data.catalystDensity === 'Medium') catScore = 4;
     score += catScore;
-    details.push(`Catalyst Density (${data.catalystDensity}): +${catScore}/5`);
+    details.push(`Catalyst Density (${data.catalystDensity}): +${catScore}/8`);
 
-    // E2. Asymmetry / Optionality (5 pts)
+    // E2. Asymmetry / Optionality (7 pts)
     let asymScore = 0;
-    if (data.asymmetryScore === 'High') asymScore = 5;
-    else if (data.asymmetryScore === 'Medium') asymScore = 3;
+    if (data.asymmetryScore === 'High') asymScore = 7;
+    else if (data.asymmetryScore === 'Medium') asymScore = 4;
 
     // Pricing Power adjustment (boost within pillar, but capped)
     if (data.pricingPower === 'Strong') {
-        asymScore = Math.min(asymScore + 1, 5); // Small boost
-        details.push('Pricing Power Boost: +1');
+        asymScore = Math.min(asymScore + 2, 7); // Small boost
+        details.push('Pricing Power Boost: +2');
     } else if (data.pricingPower === 'Weak') {
         // No boost or penalty from pricing power, just use base asymScore
     }
     score += asymScore;
-    details.push(`Asymmetry (${data.asymmetryScore}): +${asymScore}/5`);
+    details.push(`Asymmetry (${data.asymmetryScore}): +${asymScore}/7`);
 
-    return { score, maxScore: 10, details };
+    // E3. [FIX 11] Short Interest (Squeeze Potential) (Bonus within Catalyst Pillar)
+    // If we have short interest data (e.g. from FMP quote or extended profile, currently mocked/partial)
+    // Assuming data object might have it added or we check manually.
+    // For now, let's assume if 'shortInterest' > 20% we give points.
+    // NOTE: 'Symbol data' needs to be expanded to include Short Interest if not already present.
+    // Checking FundamentalData interface... it has 'shortInterest'? No.
+    // It will be added in analyzer if available.
+    // Let's assume passed in via data or metrics?
+    // Using `data['shortInterest']` blindly is risky.
+    // Added a check:
+    const si = (data as any).shortInterest || 0; // Temporary cast until types updated
+    if (si > 20) {
+        score += 2;
+        details.push(`Short Squeeze Potential (SI ${si.toFixed(1)}% > 20%): +2`);
+    }
+
+    score = Math.min(score, 15); // Cap at 15
+
+    return { score, maxScore: 15, details };
 }
 
 // --- Bonuses & Penalties ---
@@ -469,19 +514,27 @@ export function computeMultiBaggerScore(
     // 1. Growth & TAM (30% weight)
     // Extract metrics first for reuse
     const growthMetrics = calculateGrowthMetrics(finnhubMetrics.incomeStatements);
-    const cagr3y = growthMetrics.cagr3y;
+    const metrics = growthMetrics; // Alias for bonus logic
     const growthScore = scoreGrowthAndTAM(data, growthMetrics); // Re-using existing function, assuming it will be updated later
 
     // 2. Quality / Margins (25% weight)
     // Extract GM
     const grossMargin = calculateGrossMargin(finnhubMetrics.incomeStatements, sector);
-    const economics = scoreQuality(finnhubMetrics.incomeStatements, finnhubMetrics.balanceSheets, sector, grossMargin); // Using new scoreQuality
+    // [FIX 11] New Metrics
+    const netDebtEbitda = calculateNetDebtEbitda(finnhubMetrics.balanceSheets, finnhubMetrics.incomeStatements);
+    const rndIntensity = calculateRndIntensity(finnhubMetrics.incomeStatements);
+
+    const economics = scoreQuality(finnhubMetrics.incomeStatements, finnhubMetrics.balanceSheets, sector, grossMargin, netDebtEbitda, rndIntensity); // Using new scoreQuality
 
     const alignment = scoreAlignment(data);
     const valuation = scoreValuation(data);
     const catalysts = scoreCatalysts(data);
 
     let totalScore = growthScore.score + economics.score + alignment.score + valuation.score + catalysts.score;
+
+    // Bonus Variables
+    let appliedBonus = 0;
+    let bonusReason = '';
 
     // --- QUALITY + GROWTH BONUS (FIX 4: Reduced & Mutually Exclusive) ---
     // Reward elite compounders that might be expensive or have low insider % due to size.
@@ -492,7 +545,7 @@ export function computeMultiBaggerScore(
     const isSaasCompounder = (
         sector === 'SaaS' &&
         metrics.cagr3y >= STRATEGY.SAAS_COMPOUNDER.MIN_CAGR &&
-        metrics.gm >= STRATEGY.SAAS_COMPOUNDER.MIN_GROSS_MARGIN
+        (grossMargin || 0) >= STRATEGY.SAAS_COMPOUNDER.MIN_GROSS_MARGIN
     );
 
     // Apply SaaS bonus if it beats current bonus (10 > 8)
@@ -511,17 +564,18 @@ export function computeMultiBaggerScore(
         bonusReason = 'Quality Growth';
     }
 
-    // Apply single highest bonus
-    totalScore += appliedBonus;
-
+    // Apply Bonus
     if (appliedBonus > 0) {
-        console.log(`[Bonus] ${data.ticker}: +${appliedBonus} (${bonusReason})`);
-    } else {
-        // Debug for key SaaS names
-        const debugSaas = ['DDOG', 'ZS', 'CRWD', 'SNOW', 'SHOP'].includes(data.ticker);
-        if (debugSaas) {
-            console.log(`[Bonus] ${data.ticker}: No Bonus (CAGR3y=${growthMetrics.cagr3y.toFixed(1)}%, Eff=${isCapitalEfficient})`);
-        }
+        totalScore = Math.min(totalScore + appliedBonus, 100); // Cap at 100? Or just add? 
+        // Logic says Score / MaxScore.
+        // Let's just add to totalScore.
+    }
+
+    // Debug for key SaaS names
+    const isCapitalEfficient = (data.roe >= 0.35) && (data.fcfMargin >= 0.25) && (data.revenueGrowth >= 0.05); // Define isCapitalEfficient for debug log
+    const debugSaas = ['DDOG', 'ZS', 'CRWD', 'SNOW', 'SHOP'].includes(data.ticker);
+    if (debugSaas) {
+        console.log(`[Bonus] ${data.ticker}: No Bonus (CAGR3y=${growthMetrics.cagr3y.toFixed(1)}%, Eff=${isCapitalEfficient})`);
     }
 
     // Cap at 100
@@ -535,11 +589,11 @@ export function computeMultiBaggerScore(
     const summary = `
     Total Score: ${totalScore}/100 (${tier}) [Bonus: +${appliedBonus} (${bonusReason})]
     ----------------------------------------
-    A. Growth & TAM: ${growthScore.score}/35
+    A. Growth & TAM: ${growthScore.score}/25
     B. Economics:    ${economics.score}/25
-    C. Alignment:    ${alignment.score}/20
-    D. Valuation:    ${valuation.score}/10
-    E. Catalysts:    ${catalysts.score}/10
+    C. Alignment:    ${alignment.score}/15
+    D. Valuation:    ${valuation.score}/20
+    E. Catalysts:    ${catalysts.score}/15
   `.trim();
 
     return {
@@ -563,43 +617,11 @@ export function computeMultiBaggerScore(
         bonuses: appliedBonus > 0 ? [`+${appliedBonus} (${bonusReason})`] : [],
         penalties: [], // No explicit penalties tracked yet in this structure
         computedMetrics: {
-            cagr3y: cagr3y,
+            cagr3y: growthMetrics.cagr3y,
             grossMargin: grossMargin,
             revenueGrowth: growthMetrics.lastYearGrowth
         }
     };
 }
 
-/**
- * Helper to calculate Growth Metrics once
- */
-function calculateGrowthMetrics(incomeStatements: FinnhubMetrics['incomeStatements']) {
-    if (incomeStatements.length < 2) return { cagr3y: 0, lastYearGrowth: 0 };
-
-    // Dynamic CAGR
-    // const historyYears = Math.min(3, (incomeStatements.length * 0.25)); // This line seems incorrect for incomeStatements
-    const periods = Math.min(12, incomeStatements.length - 1); // 3 years or max
-    // Logic mirrors quantScore dynamic CAGR
-    // Simple version for now:
-    const currentRev = incomeStatements[0].revenue;
-    const oldRev = incomeStatements[periods]?.revenue || incomeStatements[incomeStatements.length - 1].revenue;
-
-    let cagr = 0;
-    if (oldRev > 0 && periods >= 4) {
-        const years = periods / 4; // Assuming quarterly data, 4 quarters per year
-        cagr = (Math.pow(currentRev / oldRev, 1 / years) - 1) * 100;
-    }
-
-    const lastYearRev = incomeStatements[4]?.revenue || incomeStatements[incomeStatements.length - 1].revenue;
-    const lastYearGrowth = lastYearRev > 0 ? ((currentRev - lastYearRev) / lastYearRev) * 100 : 0;
-
-    return { cagr3y: cagr, lastYearGrowth };
-}
-
-/**
- * Helper to calculate GM once
- */
-function calculateGrossMargin(incomeStatements: FinnhubMetrics['incomeStatements'], sector: SectorType): number {
-    if (incomeStatements.length === 0) return 0;
-    return (incomeStatements[0].grossProfitRatio || 0) * 100;
-}
+// End of file

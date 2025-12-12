@@ -6,7 +6,7 @@
 import * as fmp from './api/fmp.ts';
 // import * as finnhub from './api/finnhub.ts'; // [DISABLED]
 // import * as massive from './api/massive.ts'; // [REMOVED]
-import { calculateQuantitativeScore } from './scoring/quantScore.ts';
+// import { calculateQuantitativeScore } from './scoring/quantScore.ts'; // [REMOVED]
 import { calculateRiskFlags } from './scoring/riskFlags.ts';
 import * as gemini from './ai/gemini.ts';
 import { detectFounderStatus } from './utils/founderDetection.ts';
@@ -141,10 +141,10 @@ function applyProfitabilityCap(
 }
 
 const AI_SCORE_CAPS = {
-  STRONG_PASS_MAX: 12,    // Was 30
-  SOFT_PASS_MAX: 8,       // Was ~21
-  MONITOR_PENALTY: -5,    // Keep
-  AVOID_PENALTY: -10      // Keep
+  STRONG_PASS_MAX: 5,     // Was 12 (Reduced to reduce noise)
+  SOFT_PASS_MAX: 3,       // Was 8
+  MONITOR_PENALTY: -2,    // Was -5
+  AVOID_PENALTY: -5       // Was -10 (Less punishment for AI dislike if quant is good)
 };
 
 // Helper to integrate AI judgement with Quant Score
@@ -298,16 +298,33 @@ const determinePositionSize = (
 
 // ============ MAIN ANALYSIS FUNCTION ============
 
-export const analyzeStock = async (ticker: string): Promise<MultiBaggerAnalysis | null> => {
+export const analyzeStock = async (ticker: string, referenceDate?: Date): Promise<MultiBaggerAnalysis | null> => {
 
-  console.log(`[Analyzer] Starting analysis for ${ticker}...`);
+  const snapshotDate = referenceDate || new Date(); // Current time if not backtesting
+  const snapshotDateStr = snapshotDate.toISOString().split('T')[0];
+
+  console.log(`[Analyzer] Starting analysis for ${ticker}... (Snapshot: ${snapshotDateStr})`);
   const dataQualityWarnings: string[] = [];
+
+  // Helper: Point-in-Time Filter (Exclude future data)
+  // Logic: Filing Date must be <= Snapshot Date
+  const filterByDate = <T extends { date: string; filingDate?: string }>(data: T[]): T[] => {
+    if (!referenceDate) return data; // No filtering needed if not backtesting
+    return data.filter(item => {
+      // Use filingDate (when it became public) if available, else period date (approx, but risky)
+      // FMP 'date' is usually period end. 'filingDate' is SEC filing.
+      // To strictly prevent lookahead, we want filtering by filingDate <= snapshotDate.
+      // If filingDate is missing, falling back to 'date' implies we assume instant availability (optimistic).
+      // Let's use 'date' as a loose fallback but prefer filingDate.
+      const availableDate = item.filingDate || item.date;
+      return new Date(availableDate) <= snapshotDate;
+    });
+  }
 
   // STEP 1: Fetch all financial data from FMP & Finnhub (Parallel)
   // Note: FMP might fail for free users on legacy endpoints.
   // We try to fetch what we can.
-
-  // Helper to extract value from PromiseSettledResult
+  // Note 2: We fetch EVERYTHING, then filter locally. This is inefficient but FMP historical API is tricky.
   // 2. Fetch Data in Parallel (Fail-Fast or All-Settled strategy)
   // We use allSettled to be robust against one API failure
   const [
@@ -344,22 +361,22 @@ export const analyzeStock = async (ticker: string): Promise<MultiBaggerAnalysis 
 
   const profile = getVal(profileResult, 'Profile')!;
   const quote = getVal(quoteResult, 'Quote')!;
-  const incomeStatements = getVal(incomeResult, 'Income')!;
-  const balanceSheets = getVal(balanceResult, 'Balance')!;
-  const cashFlows = getVal(cashFlowResult, 'CashFlow')!;
+
+  // Consolidate Financials & Filter Point-in-Time
+  const incomeStatements = filterByDate(getVal(incomeResult, 'Income')!);
+  const balanceSheets = filterByDate(getVal(balanceResult, 'Balance')!);
+  const cashFlowStatements = filterByDate(getVal(cashFlowResult, 'CashFlow')!);
+
   const keyMetrics = getVal(metricsResult, 'Metrics', false) || [];
-  const insiderTrades = getVal(insiderTradesResult, 'Insider') || [];
+
+  const rawInsiderTrades = getVal(insiderTradesResult, 'Insider') || [];
+  const insiderTrades = referenceDate
+    ? rawInsiderTrades.filter(t => new Date(t.transactionDate) <= snapshotDate)
+    : rawInsiderTrades;
+
   const financialGrowth = getVal(growthResult, 'Growth') || [];
   const priceHistory = getVal(priceHistoryResult, 'PriceHistory', false) || [];
-  const spyHistory = getVal(spyHistoryResult, 'SPY', false) || []; // [NEW] Optional but preferred
-  // const shortInterestData = getVal(shortInterestDataResult); // [DISABLED]
-  // const finnhubMetrics = getVal(finnhubMetricsResult); // [DISABLED]
-  // const massiveFinancials = getVal(massiveFinancialsResult); // [REMOVED]
-
-  // Prefer FMP (Already extracted above as 'profile' and 'quote')
-  // Legacy Aliases for downstream code
-  // const quote = ... (Already declared)
-  // const profile = ... (Already declared)
+  const spyHistory = getVal(spyHistoryResult, 'SPY', false) || [];
 
   // If we have absolutely no data, fail.
   if (!profile || !quote) {
@@ -367,10 +384,18 @@ export const analyzeStock = async (ticker: string): Promise<MultiBaggerAnalysis 
     return null;
   }
 
-  // Consolidate Financials
-  // const incomeStatements = ... (Already declared)
-  // const balanceSheets = ... (Already declared)
-  const cashFlowStatements = cashFlows; // Alias to match downstream usage
+  // Additional Data Quality Check: Freshness
+  // If the most recent financial statement is > 180 days older than snapshot, warn STALE.
+  if (incomeStatements.length > 0) {
+    const latestDate = new Date(incomeStatements[0].filingDate || incomeStatements[0].date);
+    const ageInDays = (snapshotDate.getTime() - latestDate.getTime()) / (1000 * 60 * 60 * 24);
+
+    if (ageInDays > 180) {
+      const msg = `Data Stale: Latest filing (${incomeStatements[0].date}) is ${Math.round(ageInDays)} days old.`;
+      dataQualityWarnings.push(msg);
+      console.warn(`[DataQuality] ${msg}`);
+    }
+  }
 
   const hasFinancials = incomeStatements.length > 0;
   // let hasFinnhubMetrics = !!finnhubMetrics; // [DISABLED]
@@ -554,6 +579,7 @@ export const analyzeStock = async (ticker: string): Promise<MultiBaggerAnalysis 
       cashFlowStatements,
       quote.marketCap || profile.mktCap || 0,
       incomeStatements[0]?.revenue || 0, // [NEW] Pass TTM Revenue
+      sector, // [FIX 12] Pass Sector
       shortInterestPct
     );
   } else {
@@ -892,7 +918,7 @@ export const analyzeStock = async (ticker: string): Promise<MultiBaggerAnalysis 
 
   // [NEW] Quality Floor for world-class compounders
   // Reward high ROE, FCF, and Growth combinations
-  const cagr3y = quantScore.revenueGrowth3YrCAGR ? quantScore.revenueGrowth3YrCAGR / 100 : 0;
+  const cagr3y = revenueGrowth3YrCAGR ? revenueGrowth3YrCAGR / 100 : 0;
 
   if (
     roe != null && roe >= 0.20 &&

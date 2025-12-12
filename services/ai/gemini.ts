@@ -421,7 +421,7 @@ export const getFinancialEstimates = async (ticker: string) => {
       "returnOnEquity": number
     }
   `;
-  const task = `Estimate financials for ${ticker}. Use 0 if unavailable.`;
+  const task = `Extract explicit financial metrics for ${ticker}. DO NOT ESTIMATE or GUESS. If data is not explicitly available in your knowledge base, return 0.`;
 
   try {
     const res = await safeGenerateContent({
@@ -430,6 +430,7 @@ export const getFinancialEstimates = async (ticker: string) => {
       contents: [{ role: "user", parts: [{ text: `TASK: ${task}\n\nSCHEMA:\n${schema}` }] }],
       config: JSON_CONFIG
     });
+
     const parsed = parseJSON(res.text || "{}");
     return {
       revenueGrowth3Y: parsed?.revenueGrowth3Y ?? 0,
@@ -437,7 +438,9 @@ export const getFinancialEstimates = async (ticker: string) => {
       operatingMargin: parsed?.operatingMargin ?? 0,
       returnOnEquity: parsed?.returnOnEquity ?? 0
     };
-  } catch (e) { return { revenueGrowth3Y: 0, grossMargin: 0, operatingMargin: 0, returnOnEquity: 0 }; }
+  } catch (e) {
+    return { revenueGrowth3Y: 0, grossMargin: 0, operatingMargin: 0, returnOnEquity: 0 };
+  }
 };
 
 export const analyzeAntigravity = async (inputData: any): Promise<AntigravityResult> => {

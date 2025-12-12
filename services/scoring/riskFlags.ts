@@ -5,7 +5,21 @@
  * Auto-disqualifies stocks that fail safety checks
  */
 
-import type { IncomeStatement, BalanceSheet, CashFlowStatement, RiskFlags } from '../../types';
+import type { IncomeStatement, BalanceSheet, CashFlowStatement, RiskFlags, SectorType } from '../../types';
+
+const BENEISH_THRESHOLDS = {
+  SaaS: -1.2,      // Higher tolerance for SaaS accounting (deferred rev)
+  Biotech: -1.5,   // R&D capitalization
+  Manufacturing: -1.78,
+  SpaceTech: -1.2, // Similar to SaaS/R&D heavy
+  Quantum: -1.2,
+  Hardware: -1.78,
+  FinTech: -1.5,
+  Consumer: -1.78,
+  Industrial: -1.78,
+  Other: -1.78,
+  default: -1.78
+};
 
 /**
  * Beneish M-Score Components
@@ -84,9 +98,6 @@ export const calculateBeneishMScore = (
   // 7. TATA: Total Accruals to Total Assets
   // Correct Formula: (Net Income - Operating Cash Flow) / Total Assets
   // High positive accruals (NI > OCF) -> Higher M-Score (Risk)
-  // 7. TATA: Total Accruals to Total Assets
-  // Correct Formula: (Net Income - Operating Cash Flow) / Total Assets
-  // High positive accruals (NI > OCF) -> Higher M-Score (Risk)
   const netIncome = currentIncome.netIncome;
   const ocf = currentCashFlow?.operatingCashFlow || currentIncome.netIncome; // Fallback to NI (0 accruals) or 0? 
   // If no OCF, assume Accruals = 0 implies OCF = NI. This is conservative (TATA = 0).
@@ -108,20 +119,6 @@ export const calculateBeneishMScore = (
     + (0.404 * aqi)
     + (0.892 * sgi)
     + (0.115 * depi)
-    + (0.172 * sgai)
-    + (4.679 * tata)
-    + (0.327 * lvgi); // Fixed coefficient for LVGI? Traditional might be -0.327? 
-  // Standard Beneish: -4.84 + 0.92*DSRI + 0.528*GMI + 0.404*AQI + 0.892*SGI - 0.172*SGAI (Wait, check signs)
-  // Actually: -4.84 + 0.920*DSRI + 0.528*GMI + 0.404*AQI + 0.892*SGI - 0.172*SGAI (No, standard is +)
-  // Checked source: +0.92 DSRI + 0.528 GMI + 0.404 AQI + 0.892 SGI + 0.115 DEPI - 0.172 SGAI ??? 
-  // Wait, let's stick to the user provided formula or standard.
-  // Standard: -4.84 + 0.92*DSRI + 0.528*GMI + 0.404*AQI + 0.892*SGI + 0.115*DEPI - 0.172*SGAI + 4.679*TATA - 0.327*LVGI
-  // My previous code had +0.172*SGAI and +0.327*LVGI. 
-  // I will stick to fixing TATA first. If User didn't complain about others, I leave them.
-  // User complaint: "TATA calculation is incorrect".
-
-  return mScore;
-  + (0.115 * depi)
     - (0.172 * sgai)
     + (4.679 * tata)
     - (0.327 * lvgi);
@@ -144,7 +141,8 @@ export const calculateBeneishMScore = (
 const calculateAltmanZScore = (
   income: IncomeStatement,
   balance: BalanceSheet,
-  marketCap: number
+  marketCap: number,
+  sector: SectorType // [FIX 13]
 ): number => {
 
   const safeDivide = (a: number, b: number) => b === 0 ? 0 : a / b;
@@ -168,9 +166,17 @@ const calculateAltmanZScore = (
   const x5 = safeDivide(income.revenue, totalAssets);
 
   // Z-Score formula
-  const zScore = (1.2 * x1) + (1.4 * x2) + (3.3 * x3) + (0.6 * x4) + (1.0 * x5);
+  // Original (Manufacturing): Z = 1.2X1 + 1.4X2 + 3.3X3 + 0.6X4 + 1.0X5
+  // Z'' (Non-Manufacturing/Emerging): Z'' = 6.56X1 + 3.26X2 + 6.72X3 + 1.05X4 (No X5)
 
-  return zScore;
+  const isManufacturing = sector === 'Industrial' || sector === 'Hardware' || sector === 'Consumer'; // Rough mapping
+
+  if (isManufacturing) {
+    return (1.2 * x1) + (1.4 * x2) + (3.3 * x3) + (0.6 * x4) + (1.0 * x5);
+  } else {
+    // Use Z'' for Tech, SaaS, Biotech, Services
+    return (6.56 * x1) + (3.26 * x2) + (6.72 * x3) + (1.05 * x4);
+  }
 };
 
 /**
@@ -195,6 +201,9 @@ const evaluateAltmanZ = (
   }
 
   // Otherwise treat as a warning
+  // Note: Z'' thresholds are different (Safe > 2.6, Grey 1.1-2.6, Distress < 1.1)
+  // Standard Z: Safe > 2.99, Grey 1.81-2.99, Distress < 1.81
+  // We'll use a conservative warning threshold of 1.8 for both for now to avoid complexity overload
   if (altmanZScore < 1.8) {
     addWarning(`Altman Z-Score ${altmanZScore.toFixed(2)} < 1.8 (distress zone)`);
   }
@@ -231,43 +240,27 @@ const calculateCashRunway = (
 
   // Calculate burn for last 4 quarters (or fewer if not available)
   const quarters = Math.min(cashFlows.length, 4);
-  let totalBurn = 0;
-  let positiveFCFCount = 0;
 
-  for (let i = 0; i < quarters; i++) {
-    const cf = cashFlows[i];
-    // Free Cash Flow = OCF - CapEx (CapEx is usually negative in FMP, so OCF + CapEx? No, FMP CapEx is negative number usually. Let's check formula: OCF - CapEx. If CapEx is negative, it's OCF - (-CapEx) = OCF + CapEx. Wait.
-    // FMP: capitalExpenditure is usually negative (cash outflow).
-    // FreeCashFlow = operatingCashFlow + capitalExpenditure.
-    // Let's use the provided freeCashFlow field if available, or calc it.
-    const fcf = cf.freeCashFlow;
-
-    if (fcf > 0) {
-      positiveFCFCount++;
-    } else {
-      totalBurn += Math.abs(fcf); // Burn is the negative FCF
-    }
-  }
-
-  // If consistently positive FCF (e.g. 3 out of 4 quarters), treat as infinite runway
-  if (positiveFCFCount >= 3) return 999;
-
-  const avgBurn = totalBurn / (quarters - positiveFCFCount); // Average burn of burning quarters? Or average over all?
-  // Strategy says: "Average of last 4 quarters of [-(Operating Cash Flow - CapEx)]"
-  // If sum is positive (net generator), then infinite.
+  // [FIX 13] Correct Average Burn Logic
+  // Sum ALL FCF (positive and negative) over the period to get Net FCF.
+  // If Net FCF is positive, they are self-funding.
 
   let netFCF = 0;
   for (let i = 0; i < quarters; i++) {
-    netFCF += cashFlows[i].freeCashFlow;
+    netFCF += cashFlows[i].freeCashFlow; // FMP freeCashFlow is OCF + CapEx
   }
-  const avgFCF = netFCF / quarters;
 
-  if (avgFCF >= 0) return 999; // Self-funding on average
+  const avgQuarterlyFCF = netFCF / quarters;
 
-  const burnRate = Math.abs(avgFCF);
-  if (burnRate === 0) return 999;
+  if (avgQuarterlyFCF >= 0) {
+    return 999; // Generating cash on average
+  }
 
-  return cash / burnRate;
+  const avgBurnRate = Math.abs(avgQuarterlyFCF);
+
+  if (avgBurnRate === 0) return 999; // Should be covered by >= 0 but safety check
+
+  return cash / avgBurnRate;
 };
 
 /**
@@ -328,6 +321,7 @@ export const calculateRiskFlags = (
   cashFlowStatements: CashFlowStatement[],
   marketCap: number,
   ttmRevenue: number, // [NEW]
+  sector: SectorType, // [FIX 12]
   shortInterestPct: number = 0
 ): RiskFlags => {
 
@@ -343,7 +337,7 @@ export const calculateRiskFlags = (
 
   // Calculate scores
   const beneishMScore = calculateBeneishMScore(currentIncome, priorIncome, currentBalance, priorBalance);
-  const altmanZScore = calculateAltmanZScore(currentIncome, currentBalance, marketCap);
+  const altmanZScore = calculateAltmanZScore(currentIncome, currentBalance, marketCap, sector);
   const dilutionRate = calculateDilutionRate(currentIncome, priorIncome);
   const cashRunwayQuarters = calculateCashRunway(currentBalance, cashFlowStatements);
   const qoe = calculateQualityOfEarnings(incomeStatements, cashFlowStatements);
@@ -358,67 +352,47 @@ export const calculateRiskFlags = (
       incomeStatements[1],
       balanceSheets[0],
       balanceSheets[1],
-      cashFlowStatements[0], // [NEW]
-      cashFlowStatements[1]  // [NEW]
+      cashFlowStatements[0],
+      cashFlowStatements[1]
     );
 
-    if (mScore > -1.78) {
-      warningFlags.push(`Beneish M-Score ${mScore.toFixed(2)} > -1.78 (high manipulation risk)`);
-      if (mScore > -1.5) { // Severe
-        // disqualifying? Maybe just high warning for now unless blatant
+    // [FIX 12] Use Sector Specific Threshold
+    const threshold = BENEISH_THRESHOLDS[sector] || BENEISH_THRESHOLDS.default;
+
+    // Evaluate M-Score Risk
+    // Relax for tiny/early-stage companies (< $50M Revenue)
+    const isEarlyStage = ttmRevenue < 50_000_000;
+
+    if (mScore > -0.5) { // Extreme level
+      if (isEarlyStage) {
+        warningFlags.push(`Beneish M-Score ${mScore.toFixed(2)} > -0.5 (high manipulation risk, but early stage)`);
+        riskPenalty -= 10;
+        console.log(`[RiskDebug] Beneish: ${mScore} (WARNING - Early Stage)`);
+      } else {
+        hardKillFlags.push(`Beneish M-Score ${mScore.toFixed(2)} > -0.5 (extreme manipulation risk)`);
+        console.log(`[RiskDebug] Beneish: ${mScore} (HARD KILL)`);
       }
+    } else if (mScore > threshold) {
+      warningFlags.push(`Beneish M-Score ${mScore.toFixed(2)} > ${threshold} (${sector} risk)`);
+      riskPenalty -= 5;
+      console.log(`[RiskDebug] Beneish: ${mScore} (WARNING)`);
+    } else {
+      console.log(`[RiskDebug] Beneish: ${mScore} (PASS)`);
     }
   }
-  // Relax for tiny/early-stage companies (< $50M Revenue)
-  const isEarlyStage = ttmRevenue < 50_000_000;
 
-  if (mScore > -0.5) {
-    if (isEarlyStage) {
-      // Soften to warning for early stage
-      warningFlags.push(`Beneish M-Score ${mScore.toFixed(2)} > -0.5 (high manipulation risk, but early stage)`);
-      riskPenalty -= 10; // Heavy penalty but not kill
-      riskPenalty -= 5;
-      console.log(`[RiskDebug] Beneish: ${beneishMScore} (WARNING)`);
-    } else {
-      console.log(`[RiskDebug] Beneish: ${beneishMScore} (PASS)`);
-    }
-
-    // 2. Dilution
-    if (dilutionRate > 300) {
-      hardKillFlags.push(`Dilution rate ${dilutionRate.toFixed(1)}% > 300% (massive dilution)`);
-    } else if (dilutionRate > 25) {
-      warningFlags.push(`Dilution rate ${dilutionRate.toFixed(1)}% > 25% (high dilution)`);
-      riskPenalty -= 10;
-    } else if (dilutionRate > 10) {
-      warningFlags.push(`Dilution rate ${dilutionRate.toFixed(1)}% > 10% (moderate dilution)`);
-      riskPenalty -= 5;
-    }
-
-    // 3. Cash Runway
-    if (cashRunwayQuarters < 4 && cashRunwayQuarters !== 999) {
-      console.log(`[RiskDebug] Beneish: ${mScore} (WARNING - Early Stage, Rev $${(ttmRevenue / 1e6).toFixed(1)}M)`);
-    } else {
-      hardKillFlags.push(`Beneish M-Score ${mScore.toFixed(2)} > -0.5 (extreme manipulation risk)`);
-      console.log(`[RiskDebug] Beneish: ${mScore} (HARD KILL, Rev $${(ttmRevenue / 1e6).toFixed(1)}M)`);
-    }
-  } else if (mScore > -1.78) {
-    warningFlags.push(`Beneish M-Score ${mScore.toFixed(2)} > -1.78 (possible manipulation)`);
-    riskPenalty -= 5;
-    console.log(`[RiskDebug] Beneish: ${mScore} (WARNING)`);
-  } else {
-    console.log(`[RiskDebug] Beneish: ${mScore} (PASS)`);
-  }
-
-  // 2. Altman Z-Score
-  evaluateAltmanZ(altmanZScore, marketCap, (msg) => warningFlags.push(msg), (msg) => hardKillFlags.push(msg));
-
-  // 3. Dilution Rate
-  if (dilutionRate > 5) {
-    warningFlags.push(`Dilution Rate ${dilutionRate.toFixed(1)}% > 5% (Shareholder value erosion)`);
+  // 2. Dilution Rate
+  if (dilutionRate > 300) {
+    hardKillFlags.push(`Dilution rate ${dilutionRate.toFixed(1)}% > 300% (massive dilution)`);
+  } else if (dilutionRate > 25) {
+    warningFlags.push(`Dilution rate ${dilutionRate.toFixed(1)}% > 25% (high dilution)`);
+    riskPenalty -= 10;
+  } else if (dilutionRate > 10) {
+    warningFlags.push(`Dilution rate ${dilutionRate.toFixed(1)}% > 10% (moderate dilution)`);
     riskPenalty -= 5;
   }
 
-  // 4. Cash Runway
+  // 3. Cash Runway
   if (cashRunwayQuarters < 4 && cashRunwayQuarters !== 999) {
     if (currentIncome.netIncome < 0) {
       if (cashRunwayQuarters < 1) {

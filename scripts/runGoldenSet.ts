@@ -67,6 +67,12 @@ const GOLDEN_SET: TestCase[] = [
     // NEW: More fraud/disaster examples
     { ticker: 'NKLA', expectedTier: 'Disqualified', notes: 'Nikola fraud (fake truck demo), massive dilution, no real product.' },
     { ticker: 'SPCE', expectedTier: 'Disqualified', notes: 'Virgin Galactic cash burn, no revenue path, founder dilution machine.' },
+
+    // ═══════════════════════════════════════════════════════════════
+    // FALLEN ANGELS (Should score Tier 2/3, not Tier 1)
+    // ═══════════════════════════════════════════════════════════════
+    { ticker: 'PTON', expectedTier: 'Tier 3', notes: 'Post-COVID crash, inventory issues, negative FCF history. Should NOT be Tier 1.' },
+    { ticker: 'ZM', expectedTier: 'Tier 2/3', notes: 'Growth crashed from 300% to single digits. Cash cow but growth trap?' },
 ];
 
 
